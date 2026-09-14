@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Validate release tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag_version="${TAG_NAME#v}"
+          package_version="$(python3 -c 'import json; print(json.load(open("host/package.json"))["version"])')"
+          if [[ "${tag_version}" != "${package_version}" ]]; then
+              echo "Tag ${TAG_NAME} does not match host/package.json version ${package_version}" >&2
+              exit 1
+          fi
+
+      - name: Run checks
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 -m compileall -q host protocol
+          node --check host/frontend/index.js
+
+      - name: Build release assets
+        run: python3 host/build.py
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          zip_asset="$(find artifacts -maxdepth 1 -type f -name 'steamos-remote-decky-*.zip' -print -quit)"
+          checksum_asset="$(find artifacts -maxdepth 1 -type f -name 'steamos-remote-decky-*.zip.sha256' -print -quit)"
+          [[ -n "${zip_asset}" && -n "${checksum_asset}" ]]
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+              gh release upload "${TAG_NAME}" "${zip_asset}" "${checksum_asset}" --clobber
+          else
+              gh release create "${TAG_NAME}" \
+                  "${zip_asset}" \
+                  "${checksum_asset}" \
+                  --title "SteamOS Remote ${TAG_NAME}" \
+                  --generate-notes \
+                  --verify-tag
+          fi
