@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+host/dist/index.js
+artifacts/*.zip
+artifacts/*.sha256

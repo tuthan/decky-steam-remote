@@ -1,0 +1,19 @@
+{
+  "protocol_version": 1,
+  "outputs": [
+    {
+      "id": "output-1",
+      "name": "HDMI-A-1",
+      "description": "Reference display",
+      "is_internal": false,
+      "current_mode_id": "mode-3440-59",
+      "modes": [
+        {"id": "mode-3440-59", "width": 3440, "height": 1440, "refresh_hz": 59},
+        {"id": "mode-3840-60", "width": 3840, "height": 2160, "refresh_hz": 60},
+        {"id": "mode-1920-60", "width": 1920, "height": 1080, "refresh_hz": 60}
+      ],
+      "generation": 12,
+      "rgb_range": 0
+    }
+  ]
+}

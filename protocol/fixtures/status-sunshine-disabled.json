@@ -1,0 +1,26 @@
+{
+  "protocol_version": 1,
+  "host_id": "fixture-host",
+  "boot_id": "fixture-boot",
+  "steam_bridge": "ready",
+  "steam_reason": null,
+  "uptime_seconds": 812,
+  "cpu_temperature": null,
+  "capabilities": {
+    "suspend": "available",
+    "restart": "unverified",
+    "shutdown": "unverified",
+    "display_rescue": "unverified",
+    "sunshine_restart": "disabled"
+  },
+  "sunshine": {
+    "enabled": false,
+    "provider": null,
+    "state": "disabled",
+    "checked_at": null,
+    "age_ms": null,
+    "stale": false,
+    "reason": null,
+    "operation_id": null
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://steamos-remote.local/protocol/v1/schema.json",
+  "title": "SteamOS Remote v1 wire contract",
+  "type": "object",
+  "required": ["protocol_version"],
+  "properties": {
+    "protocol_version": {"const": 1},
+    "host_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "boot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "steam_bridge": {"enum": ["ready", "unavailable"]},
+    "steam_reason": {"type": ["string", "null"], "maxLength": 256},
+    "uptime_seconds": {"type": ["integer", "null"], "minimum": 0},
+    "cpu_temperature": {
+      "type": ["object", "null"],
+      "required": ["celsius", "label"],
+      "properties": {
+        "celsius": {"type": "number", "minimum": -100, "maximum": 250},
+        "label": {"type": "string", "minLength": 1, "maxLength": 64}
+      },
+      "additionalProperties": false
+    },
+    "wake_target": {
+      "type": "object",
+      "required": ["available", "mac", "interface", "source_address", "reason"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "mac": {"type": "string", "pattern": "^[0-9a-f]{0,12}$"},
+        "interface": {"type": "string", "maxLength": 32},
+        "source_address": {"type": ["string", "null"], "maxLength": 64},
+        "reason": {"type": ["string", "null"], "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "required": ["suspend", "restart", "shutdown", "display_rescue", "sunshine_restart"],
+      "properties": {
+        "suspend": {"enum": ["available", "unavailable", "unsupported", "unverified"]},
+        "restart": {"enum": ["available", "unavailable", "unsupported", "unverified"]},
+        "shutdown": {"enum": ["available", "unavailable", "unsupported", "unverified"]},
+        "display_rescue": {"enum": ["available", "unavailable", "unsupported", "unverified"]},
+        "sunshine_restart": {"enum": ["available", "disabled", "unavailable", "unverified"]}
+      },
+      "additionalProperties": false
+    },
+    "sunshine": {"$ref": "#/$defs/sunshine"},
+    "outputs": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/output"}},
+    "operation": {"$ref": "#/$defs/operation"},
+    "pairing_session": {"type": "string", "minLength": 16, "maxLength": 256}
+  },
+  "$defs": {
+    "sunshine": {
+      "type": "object",
+      "required": ["enabled", "provider", "state", "checked_at", "age_ms", "stale", "reason", "operation_id"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "provider": {"type": ["string", "null"], "maxLength": 128},
+        "state": {"enum": ["disabled", "unavailable", "unknown", "running", "stopped", "restarting"]},
+        "checked_at": {"type": ["string", "null"], "maxLength": 64},
+        "age_ms": {"type": ["integer", "null"], "minimum": 0},
+        "stale": {"type": "boolean"},
+        "reason": {"type": ["string", "null"], "maxLength": 256},
+        "operation_id": {"type": ["string", "null"], "maxLength": 128}
+      },
+      "additionalProperties": false
+    },
+    "mode": {
+      "type": "object",
+      "required": ["id", "width", "height", "refresh_hz"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "width": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "height": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "refresh_hz": {"type": ["number", "null"], "minimum": 1, "maximum": 1000}
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "required": ["id", "name", "description", "is_internal", "current_mode_id", "modes", "generation"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "name": {"type": ["string", "null"], "maxLength": 256},
+        "description": {"type": ["string", "null"], "maxLength": 256},
+        "is_internal": {"type": ["boolean", "null"]},
+        "current_mode_id": {"type": ["string", "null"], "maxLength": 128},
+        "modes": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/mode"}},
+        "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "rgb_range": {"type": "integer", "enum": [0, 1, 2]}
+      },
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "object",
+      "required": ["id", "request_id", "state", "kind", "created_at", "updated_at"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "state": {"enum": ["accepted", "dispatched", "observed_return", "succeeded", "failed", "unknown"]},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "created_at": {"type": "string", "maxLength": 64},
+        "updated_at": {"type": "string", "maxLength": 64},
+        "outcome": {"type": ["string", "null"], "maxLength": 128},
+        "reason": {"type": ["string", "null"], "maxLength": 256},
+        "preview_id": {"type": ["string", "null"], "maxLength": 128},
+        "restore_state": {"type": ["string", "null"], "maxLength": 64}
+      },
+      "additionalProperties": true
+    }
+  }
+}

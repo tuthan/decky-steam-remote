@@ -1,0 +1,183 @@
+"""Pure display profile helpers copied from the validated spike behavior."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class DisplayError(ValueError):
+    pass
+
+
+def _mode_id(value: Any) -> str:
+    if isinstance(value, int) and value >= 0:
+        return str(value)
+    if isinstance(value, str) and 0 < len(value) <= 128:
+        return value
+    raise DisplayError("display mode ID is invalid")
+
+
+def normalize_mode(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise DisplayError("display mode is not an object")
+    mode = {
+        "id": _mode_id(value.get("id")),
+        "width": value.get("width"),
+        "height": value.get("height"),
+        "refresh_hz": value.get("refresh_hz"),
+    }
+    if not isinstance(mode["width"], int) or not 1 <= mode["width"] <= 16384:
+        raise DisplayError("display mode width is invalid")
+    if not isinstance(mode["height"], int) or not 1 <= mode["height"] <= 16384:
+        raise DisplayError("display mode height is invalid")
+    refresh = mode["refresh_hz"]
+    if refresh is not None and (not isinstance(refresh, (int, float)) or isinstance(refresh, bool) or not 1 <= refresh <= 1000):
+        raise DisplayError("display mode refresh is invalid")
+    return mode
+
+
+def normalize_output(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise DisplayError("display output is not an object")
+    output_id = _mode_id(value.get("id"))
+    name = value.get("name")
+    description = value.get("description")
+    if name is not None and (not isinstance(name, str) or len(name) > 256):
+        raise DisplayError("display name is invalid")
+    if description is not None and (not isinstance(description, str) or len(description) > 256):
+        raise DisplayError("display description is invalid")
+    modes_raw = value.get("modes", [])
+    if not isinstance(modes_raw, list) or len(modes_raw) > 256:
+        raise DisplayError("display mode list is invalid")
+    modes = [normalize_mode(mode) for mode in modes_raw]
+    mode_ids = [mode["id"] for mode in modes]
+    if len(set(mode_ids)) != len(mode_ids):
+        raise DisplayError("display mode IDs are not unique")
+    current = value.get("current_mode_id")
+    if current is not None:
+        current = _mode_id(current)
+    generation = value.get("generation")
+    if not isinstance(generation, int) or not 0 <= generation <= 2_147_483_647:
+        raise DisplayError("display generation is invalid")
+    rgb_range = value.get("rgb_range", 0)
+    if rgb_range not in (0, 1, 2):
+        raise DisplayError("display RGB range is invalid")
+    is_internal = value.get("is_internal")
+    if is_internal is not None and not isinstance(is_internal, bool):
+        raise DisplayError("display internal flag is invalid")
+    return {
+        "id": output_id,
+        "name": name,
+        "description": description,
+        "is_internal": is_internal,
+        "current_mode_id": current,
+        "modes": modes,
+        "generation": generation,
+        "rgb_range": rgb_range,
+    }
+
+
+def normalize_snapshot(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise DisplayError("bridge snapshot is not an object")
+    outputs_raw = value.get("outputs", [])
+    if not isinstance(outputs_raw, list) or len(outputs_raw) > 8:
+        raise DisplayError("bridge output list is invalid")
+    outputs = [normalize_output(output) for output in outputs_raw]
+    output_ids = [output["id"] for output in outputs]
+    if len(set(output_ids)) != len(output_ids):
+        raise DisplayError("bridge output IDs are not unique")
+    methods = value.get("methods", {})
+    if not isinstance(methods, dict):
+        raise DisplayError("bridge methods are invalid")
+    return {
+        "ready": value.get("ready") is True,
+        "reason": str(value.get("reason", ""))[:256] if value.get("reason") is not None else "",
+        "methods": {
+            "suspend": methods.get("suspend") is True,
+            "restart": methods.get("restart") is True,
+            "shutdown": methods.get("shutdown") is True,
+            "display": methods.get("display") is True,
+        },
+        "outputs": outputs,
+        "cpu_temperature": normalize_temperature(value.get("cpu_temperature")),
+        "reported_at": value.get("reported_at"),
+    }
+
+
+def normalize_temperature(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise DisplayError("CPU temperature is invalid")
+    celsius = value.get("celsius")
+    label = value.get("label")
+    if not isinstance(celsius, (int, float)) or isinstance(celsius, bool) or not -100 <= celsius <= 250:
+        raise DisplayError("CPU temperature value is invalid")
+    if not isinstance(label, str) or not 0 < len(label) <= 64:
+        raise DisplayError("CPU temperature label is invalid")
+    return {"celsius": float(celsius), "label": label}
+
+
+def display_identity(output: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": output["id"],
+        "name": output.get("name"),
+        "description": output.get("description"),
+        "is_internal": output.get("is_internal"),
+    }
+
+
+def same_display_identity(expected: dict[str, Any], actual: dict[str, Any] | None) -> bool:
+    if not actual or actual.get("id") != expected.get("id"):
+        return False
+    for key in ("name", "description", "is_internal"):
+        if expected.get(key) is not None and actual.get(key) != expected.get(key):
+            return False
+    return True
+
+
+def same_mode_profile(expected: dict[str, Any] | None, actual: dict[str, Any] | None) -> bool:
+    if not expected or not actual:
+        return False
+    if expected.get("width") != actual.get("width") or expected.get("height") != actual.get("height"):
+        return False
+    expected_refresh = expected.get("refresh_hz")
+    actual_refresh = actual.get("refresh_hz")
+    if expected_refresh is None or actual_refresh is None:
+        return expected_refresh == actual_refresh
+    try:
+        # Steam commonly re-enumerates a requested 60 Hz mode as 59 Hz after
+        # a mode switch. Treat only that known presentation rounding as the
+        # same physical mode; a real 60/61 Hz difference remains distinct.
+        expected_value = float(expected_refresh)
+        actual_value = float(actual_refresh)
+        return expected_value == actual_value or {expected_value, actual_value} == {59.0, 60.0}
+    except (TypeError, ValueError):
+        return False
+
+
+def mode_profile(mode: dict[str, Any] | None) -> dict[str, Any] | None:
+    if mode is None:
+        return None
+    return {key: mode.get(key) for key in ("id", "width", "height", "refresh_hz")}
+
+
+def resolve_restore_mode(output: dict[str, Any], baseline: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    by_id = next((mode for mode in output.get("modes", []) if mode["id"] == baseline.get("id")), None)
+    if by_id and same_mode_profile(by_id, baseline):
+        return by_id, "id"
+    same_resolution = [
+        mode for mode in output.get("modes", [])
+        if mode["width"] == baseline.get("width") and mode["height"] == baseline.get("height")
+    ]
+    same_profile = [mode for mode in same_resolution if same_mode_profile(mode, baseline)]
+    if len(same_profile) == 1:
+        return same_profile[0], "mode_properties"
+    if len(same_profile) > 1:
+        raise DisplayError("original mode replacement is ambiguous; restore not sent")
+    if len(same_resolution) == 1:
+        return same_resolution[0], "resolution_fallback"
+    if len(same_resolution) > 1:
+        raise DisplayError("original mode ID disappeared and replacement is ambiguous; restore not sent")
+    raise DisplayError("original mode and stable resolution are no longer advertised; restore not sent")

@@ -1,0 +1,26 @@
+{
+  "protocol_version": 1,
+  "host_id": "fixture-host",
+  "boot_id": "fixture-boot",
+  "steam_bridge": "ready",
+  "steam_reason": null,
+  "uptime_seconds": 812,
+  "cpu_temperature": null,
+  "capabilities": {
+    "suspend": "available",
+    "restart": "unverified",
+    "shutdown": "unverified",
+    "display_rescue": "unverified",
+    "sunshine_restart": "unavailable"
+  },
+  "sunshine": {
+    "enabled": true,
+    "provider": "decky-sunshine",
+    "state": "unknown",
+    "checked_at": "2026-09-13T12:49:00Z",
+    "age_ms": 65000,
+    "stale": true,
+    "reason": "provider status timed out",
+    "operation_id": null
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "SteamOS Remote",
+  "author": "SteamOS Remote",
+  "flags": [],
+  "api_version": 0,
+  "publish": {
+    "tags": ["remote", "display", "power"],
+    "description": "Authenticated LAN host for the SteamOS Remote Omarchy client."
+  }
+}
