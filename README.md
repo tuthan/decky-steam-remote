@@ -7,6 +7,10 @@ over a local network. The same install can run as a Client, Server, or Both.
 This repository contains the Decky host in `host/` and the shared protocol
 contract in `protocol/`.
 
+## Preview
+
+![SteamOS Remote Decky host preview](assets/preview.png)
+
 ## Install
 
 Decky Loader must already be installed.
