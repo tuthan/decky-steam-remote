@@ -353,6 +353,10 @@ class DeviceCoordinator:
             # The chooser saves the name in the same transaction as the first
             # role, so Client mode is not required to be active yet.
             self.client.set_client_name(changes["client_name"])
+        if "show_nonstandard_display_modes" in changes:
+            if self.client is None:
+                raise CoordinatorError(self._recovery_error or "client state is unavailable", "state_recovery_required")
+            self.client.set_display_preferences(changes["show_nonstandard_display_modes"])
         if "device_mode" in changes or "mode" in changes:
             await_mode = changes.get("device_mode", changes.get("mode"))
             result = self.set_mode(await_mode, client_name=changes.get("client_name"))

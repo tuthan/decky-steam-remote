@@ -30,7 +30,7 @@ fi
 readonly REPOSITORY="${REPOSITORY:-tuthan/decky-steam-remote}"
 readonly PLUGIN_NAME="steamos-remote"
 readonly PLUGIN_DIR="${DECKY_PLUGIN_DIR:-${HOME}/homebrew/plugins}"
-readonly VERSION="${1:-${VERSION:-LATEST}}"
+readonly REQUESTED_VERSION="${1:-${VERSION:-LATEST}}"
 
 [[ "${PLUGIN_DIR}" == /* ]] || die "Decky plugin directory must be an absolute path"
 [[ "${PLUGIN_DIR}" != "/" && "${PLUGIN_DIR}" != "${HOME}" ]] || \
@@ -62,11 +62,15 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 release_url="https://api.github.com/repos/${REPOSITORY}/releases/latest"
-if [[ "${VERSION}" != "LATEST" ]]; then
-    release_url="https://api.github.com/repos/${REPOSITORY}/releases/tags/${VERSION}"
+if [[ "${REQUESTED_VERSION}" != "LATEST" ]]; then
+    release_url="https://api.github.com/repos/${REPOSITORY}/releases/tags/${REQUESTED_VERSION}"
 fi
 
-echo "Looking up ${VERSION} release for ${REPOSITORY}"
+if [[ "${REQUESTED_VERSION}" == "LATEST" ]]; then
+    echo "Looking up the latest release for ${REPOSITORY}"
+else
+    echo "Looking up ${REQUESTED_VERSION} release for ${REPOSITORY}"
+fi
 release_json="$(curl \
     --fail \
     --location \
@@ -78,10 +82,22 @@ release_json="$(curl \
     --user-agent 'steamos-remote-installer' \
     "${release_url}")" || die "could not read the GitHub release"
 
+release_tag="$(
+    printf '%s\n' "${release_json}" |
+        sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' |
+        head -n 1
+)"
+[[ -n "${release_tag}" ]] || die "GitHub release does not contain a tag"
+release_version="${release_tag#v}"
+[[ -n "${release_version}" && "${release_version}" != "${release_tag}" ]] || \
+    die "unexpected GitHub release tag: ${release_tag}"
+
 download_url="$(
     printf '%s\n' "${release_json}" |
         sed -nE 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"([^"[:space:]]*\/steamos-remote-decky-[^"[:space:]]+\.zip)".*/\1/p' |
-        head -n 1
+        awk -v expected="steamos-remote-decky-${release_version}.zip" '
+            $0 ~ "/" expected "$" { print; exit }
+        '
 )"
 [[ -n "${download_url}" ]] || die "release does not contain a steamos-remote-decky ZIP asset"
 [[ "${download_url}" == "https://github.com/${REPOSITORY}/releases/download/"* ]] || \

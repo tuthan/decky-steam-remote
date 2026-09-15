@@ -20,7 +20,10 @@
   // component kit to a legacy bundle, use it directly; the small semantic
   // fallbacks keep the same component tree usable by the development harness
   // and by older loaders while retaining stable focus keys and ARIA labels.
-  const NativeUI = window.DeckyUI || window.__DECKY_UI__ || serverAPI?.UI || {};
+  // Legacy API-v0 plugins receive Decky's frontend library as the DFL global.
+  // Prefer it so ButtonItem/Focusable participate in Steam's controller
+  // navigation; the other names keep newer loaders and the harness working.
+  const NativeUI = window.DFL || window.DeckyUI || window.__DECKY_UI__ || serverAPI?.UI || {};
   const UI_COLORS = Object.freeze({
     background: "#0f151d",
     text: "#f3f6fa",
@@ -34,6 +37,28 @@
     disabledText: "#aab4bf",
     danger: "#ffb4b4",
   });
+  const STANDARD_REFRESH_RATES = Object.freeze([50, 59, 60, 90, 100, 119, 120, 144, 165, 240]);
+  const STANDARD_RESOLUTIONS = new Set([
+    "640x480", "800x600", "1024x768", "1152x864", "1280x720", "1280x800", "1280x1024",
+    "1360x768", "1366x768", "1440x900", "1600x900", "1600x1200", "1680x1050", "1920x1080",
+    "1920x1200", "2048x1152", "2560x1080", "2560x1440", "2560x1600", "3440x1440", "3840x2160",
+    "3840x2400", "5120x1440", "5120x2160", "7680x4320",
+  ]);
+
+  function isStandardRefreshRate(value) {
+    if (value === null || value === undefined) return true;
+    const rate = Number(value);
+    return Number.isFinite(rate) && STANDARD_REFRESH_RATES.some(candidate => Math.abs(rate - candidate) < 0.3);
+  }
+
+  function isStandardResolution(mode) {
+    if (!mode || mode.width === null || mode.width === undefined || mode.height === null || mode.height === undefined) return true;
+    return STANDARD_RESOLUTIONS.has(`${Number(mode.width)}x${Number(mode.height)}`);
+  }
+
+  function isStandardDisplayMode(mode) {
+    return isStandardResolution(mode) && isStandardRefreshRate(mode?.refresh_hz);
+  }
   const useRef = React?.useRef || (value => ({current: value}));
   let stopped = false;
   let commandBusy = false;
@@ -915,7 +940,41 @@
       React.createElement("strong", {key: "title", style: {display: "block", color: UI_COLORS.text}}, `${selected ? "● " : "○ "}${title}`),
       React.createElement("span", {key: "description", style: {display: "block", marginTop: "3px", color: UI_COLORS.muted}}, description),
     ];
-    if (NativeUI.Focusable) return React.createElement(NativeUI.Focusable, props, ...content);
+    if (NativeUI.ButtonItem) return React.createElement(NativeUI.ButtonItem, {...props, layout: "below", highlightOnFocus: true}, ...content);
+    if (NativeUI.Focusable) return React.createElement(NativeUI.Focusable, {...props, onActivate: onClick}, ...content);
+    return React.createElement("button", props, ...content);
+  }
+
+  function ToggleRow({label, description, checked, onClick, focusKey, disabled = false}) {
+    const accessibleLabel = `${label}. ${checked ? "On" : "Off"}. ${description}`;
+    const props = {
+      type: "button",
+      onClick,
+      disabled,
+      focusKey,
+      "data-focus-key": focusKey,
+      "aria-label": accessibleLabel,
+      "aria-pressed": checked,
+      style: {
+        display: "block",
+        width: "100%",
+        minHeight: "56px",
+        marginTop: "8px",
+        padding: "8px",
+        textAlign: "left",
+        color: disabled ? UI_COLORS.disabledText : UI_COLORS.text,
+        background: disabled ? UI_COLORS.disabledSurface : UI_COLORS.surface,
+        border: `1px solid ${UI_COLORS.border}`,
+        borderRadius: "4px",
+        appearance: "none",
+      },
+    };
+    const content = [
+      React.createElement("strong", {key: "title", style: {display: "block", color: disabled ? UI_COLORS.disabledText : UI_COLORS.text}}, `${checked ? "☑" : "☐"} ${label}`),
+      React.createElement("span", {key: "description", style: {display: "block", marginTop: "3px", color: disabled ? UI_COLORS.disabledText : UI_COLORS.muted}}, description),
+    ];
+    if (NativeUI.ButtonItem) return React.createElement(NativeUI.ButtonItem, {...props, layout: "below", highlightOnFocus: true}, ...content);
+    if (NativeUI.Focusable) return React.createElement(NativeUI.Focusable, {...props, onActivate: onClick}, ...content);
     return React.createElement("button", props, ...content);
   }
 
@@ -1391,7 +1450,15 @@
     function renderDisplay() {
       const outputs = remote?.outputs || [];
       const output = displayOutput();
-      const modes = output ? [...(output.modes || [])].sort((a, b) => (b.width * b.height - a.width * a.height) || ((b.refresh_hz || 0) - (a.refresh_hz || 0))) : [];
+      const showNonstandard = client.show_nonstandard_display_modes === true;
+      const currentModeId = output?.current_mode_id == null ? "" : String(output.current_mode_id);
+      const allModes = output ? [...(output.modes || [])].sort((a, b) => {
+        if (currentModeId && String(a.id) === currentModeId) return -1;
+        if (currentModeId && String(b.id) === currentModeId) return 1;
+        return (b.width * b.height - a.width * a.height) || ((b.refresh_hz || 0) - (a.refresh_hz || 0));
+      }) : [];
+      const modes = allModes.filter(item => showNonstandard || isStandardDisplayMode(item) || String(item.id) === currentModeId);
+      const hiddenModeCount = allModes.length - modes.length;
       const selected = modes.find(item => item.id === selectedModeId) || modes[0];
       const profile = (remote?.profiles || []).find(item => item.output_id === output?.id) || (remote?.profiles || [])[0];
       const preview = remote?.preview;
@@ -1399,11 +1466,12 @@
       return React.createElement(PanelSection, {title: "Display settings"},
         React.createElement(PanelSectionRow, {focusKey: "display.target"}, React.createElement(Text, null, `Target device: ${identityName()}`), React.createElement(Text, {muted: true}, output?.name || "No output advertised")),
         outputs.length > 1 && React.createElement(PanelSectionRow, {focusKey: "display.output-picker"}, React.createElement(Picker, {label: "Output", value: output?.id || "", options: outputs.map(item => ({value: item.id, label: item.name || item.id})), onChange: event => {setSelectedOutputId(event.target.value); setSelectedModeId("");}, focusKey: "display.output-picker"})),
-        preview && renderPreviewCard(preview),
+        React.createElement(PanelSectionRow, {focusKey: "display.mode-filter"}, React.createElement(Text, {muted: true}, showNonstandard ? "Showing all advertised resolutions and refresh rates." : hiddenModeCount ? `${hiddenModeCount} non-standard ${hiddenModeCount === 1 ? "mode" : "modes"} hidden. Enable them in Settings.` : "Showing common resolutions and refresh rates. The current mode is always shown.")),
         React.createElement(PanelSectionRow, {focusKey: "display.current"}, React.createElement(Text, null, `Current mode: ${modeLabel(output && modes.find(item => item.id === output.current_mode_id))}`), profile ? React.createElement(Text, {muted: true}, `Saved recovery mode: ${modeLabel(profile.mode)}`) : React.createElement(Text, {muted: true}, "No recovery mode saved")),
-        !modes.length && React.createElement(PanelSectionRow, {focusKey: "display.empty"}, React.createElement(Text, null, "No display modes are available from the remote device.")),
+        !modes.length && React.createElement(PanelSectionRow, {focusKey: "display.empty"}, React.createElement(Text, null, allModes.length ? "No common display modes are available. Enable non-standard modes in Settings." : "No display modes are available from the remote device.")),
         modes.map(item => React.createElement(PanelSectionRow, {key: `${output?.id}.${item.id}`, focusKey: `display.mode.${output?.id}.${item.id}`}, React.createElement(SelectableRow, {selected: selected?.id === item.id, title: modeLabel(item), description: item.id === output?.current_mode_id ? "Current" : profile?.mode?.id === item.id ? "Saved" : "Select this mode; selection does not change the display.", onClick: () => setSelectedModeId(item.id), focusKey: `display.mode.${output?.id}.${item.id}`}))),
         React.createElement(PanelSectionRow, {focusKey: "display.preview"}, React.createElement(Button, {label: selected ? `Preview ${modeLabel(selected)}` : "Preview selected mode", disabled: !selected || selected.id === output?.current_mode_id || Boolean(preview) || Boolean(busy), onClick: async () => {if (!(await ensureAvailable("preview", {output_id: output.id, mode_id: selected.id}))) return; const value = await run("remote_preview", {output_id: output.id, mode_id: selected.id, generation: output.generation}, "Applying preview…"); if (value) await loadSettings();}, focusKey: "display.preview"})),
+        preview && renderPreviewCard(preview),
         saveCurrent && React.createElement(PanelSectionRow, {focusKey: "display.save-current"}, React.createElement(Text, null, "Save the current display as recovery mode after checking the physical picture."), React.createElement(Button, {label: "Save current display as recovery mode", disabled: Boolean(busy), onClick: () => setModal({kind: "save-current", output}), focusKey: "display.save-current"})),
         !profile && !saveCurrent && React.createElement(PanelSectionRow, {focusKey: "display.no-save"}, React.createElement(Text, null, "No current display mode is available to save.")),
         modal?.kind === "save-current" && React.createElement(ConfirmModal, {title: "Save current display as recovery mode?", body: `Can you see the picture on ${identityName()}'s display? The host will read the current mode back and save it for Restore saved display.`, confirmLabel: "Save recovery mode", busy: Boolean(busy), onCancel: () => setModal(null), onConfirm: async () => {if (!(await ensureAvailable("save_current"))) return; const selectedModal = modal; setModal(null); await run("remote_save_current", {output_id: selectedModal.output.id, generation: selectedModal.output.generation}, "Recovery mode saved");}}),
@@ -1477,6 +1545,7 @@
       const serverWillDisable = roleHasServer(savedMode) && !roleHasServer(draftMode);
       const clientWillDisable = roleHasClient(savedMode) && !roleHasClient(draftMode);
       const destination = destinationAfterSettings();
+      const showNonstandard = client.show_nonstandard_display_modes === true;
       const leaveBody = [
         serverWillDisable && "Paired devices will no longer be able to control this device. Their access will be saved for when Server is enabled again.",
         clientWillDisable && "The saved remote pairing remains available when Client is enabled again. An unresolved remote operation may continue on the other device.",
@@ -1512,6 +1581,10 @@
             }
           },
         }),
+        roleHasClient(mode) && React.createElement(PanelSection, {title: "Client"},
+          React.createElement(PanelSectionRow, {focusKey: "settings.display-preferences.explanation"}, React.createElement(Text, null, "Display preferences"), React.createElement(Text, {muted: true}, "Keep uncommon resolutions and refresh rates hidden for a shorter, safer mode list.")),
+          React.createElement(PanelSectionRow, {focusKey: "settings.display-preferences.toggle"}, React.createElement(ToggleRow, {label: "Show non-standard display modes", description: "Also show uncommon resolutions and refresh rates. The current mode is always shown.", checked: showNonstandard, disabled: Boolean(busy), onClick: () => void run("update_settings", {changes: {show_nonstandard_display_modes: !showNonstandard}}, showNonstandard ? "Non-standard display modes hidden" : "Non-standard display modes shown"), focusKey: "settings.display-preferences.toggle"}))
+        ),
         React.createElement(PanelSection, {title: "Server"},
           React.createElement(PanelSectionRow, {focusKey: "settings.listen"}, React.createElement(Text, null, server.listener?.running ? "Accepting connections" : "Server paused"), React.createElement(Button, {label: server.listener?.running ? "Pause accepting connections" : "Accept connections", disabled: Boolean(busy) || !roleHasServer(mode), onClick: () => void run("update_settings", {changes: {listen_enabled: !server.listener?.running}}), focusKey: "settings.listen"})),
           React.createElement(PanelSectionRow, {focusKey: "settings.address"}, React.createElement(Text, {muted: true}, `Address: ${server.listener?.address || "all interfaces"}:${server.listener?.port || 18443}`)),

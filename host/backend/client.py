@@ -254,6 +254,7 @@ class ClientService:
             "client_id": opaque_id("client-") ,
             "client_name": default_client_name(),
             "upgrade_notice": False,
+            "show_nonstandard_display_modes": False,
             "remote": None,
             "staged_remote": None,
             "pending_pairing": None,
@@ -275,7 +276,7 @@ class ClientService:
         except ClientError:
             state["client_name"] = default_client_name()
             changed = True
-        for key, default in (("setup_complete", False), ("device_mode", None), ("upgrade_notice", False), ("remote", None), ("staged_remote", None), ("pending_pairing", None), ("operations", {}), ("wake", None)):
+        for key, default in (("setup_complete", False), ("device_mode", None), ("upgrade_notice", False), ("show_nonstandard_display_modes", False), ("remote", None), ("staged_remote", None), ("pending_pairing", None), ("operations", {}), ("wake", None)):
             if key not in state:
                 state[key] = default
                 changed = True
@@ -306,6 +307,9 @@ class ClientService:
             changed = True
         if not isinstance(state.get("upgrade_notice"), bool):
             state["upgrade_notice"] = False
+            changed = True
+        if not isinstance(state.get("show_nonstandard_display_modes"), bool):
+            state["show_nonstandard_display_modes"] = False
             changed = True
         if not isinstance(state.get("mode_transition"), (dict, type(None))):
             state["mode_transition"] = None
@@ -356,6 +360,12 @@ class ClientService:
         self.store.mutate(lambda state: state.__setitem__("client_name", normalized))
         return self.public_status()
 
+    def set_display_preferences(self, show_nonstandard_display_modes: Any) -> dict[str, Any]:
+        if not isinstance(show_nonstandard_display_modes, bool):
+            raise ClientError("show_nonstandard_display_modes must be boolean", "invalid_display_preferences")
+        self.store.mutate(lambda state: state.__setitem__("show_nonstandard_display_modes", show_nonstandard_display_modes))
+        return self.public_status()
+
     def dismiss_upgrade_notice(self) -> dict[str, Any]:
         self.store.mutate(lambda state: state.__setitem__("upgrade_notice", False))
         return self.public_status()
@@ -368,6 +378,7 @@ class ClientService:
             "client_id": state.get("client_id"),
             "client_name": state.get("client_name") or default_client_name(),
             "upgrade_notice": state.get("upgrade_notice") is True,
+            "show_nonstandard_display_modes": state.get("show_nonstandard_display_modes") is True,
             "running": self._running,
             "mode_transition": _copy(state.get("mode_transition")) if isinstance(state.get("mode_transition"), dict) else None,
             "last_service_errors": _copy(state.get("last_service_errors", {})),

@@ -104,6 +104,25 @@ class FakeRemoteCore:
 
 
 class ClientTests(unittest.TestCase):
+    def test_display_mode_preference_defaults_hidden_and_survives_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = ClientService(directory)
+            try:
+                self.assertFalse(service.public_status()["show_nonstandard_display_modes"])
+                with self.assertRaises(ClientError) as invalid:
+                    service.set_display_preferences("yes")
+                self.assertEqual(invalid.exception.code, "invalid_display_preferences")
+                enabled = service.set_display_preferences(True)
+                self.assertTrue(enabled["show_nonstandard_display_modes"])
+            finally:
+                service.stop()
+
+            restored = ClientService(directory)
+            try:
+                self.assertTrue(restored.public_status()["show_nonstandard_display_modes"])
+            finally:
+                restored.stop()
+
     def test_bounded_queue_deduplicates_reads_and_settles_rejected_mutations(self):
         queue = BoundedWorkQueue(max_workers=1, max_pending=2)
         started = threading.Event()

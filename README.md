@@ -31,7 +31,7 @@ ssh deck@steamdeck.local 'bash -s' < install.sh
 To install a specific release:
 
 ```sh
-ssh deck@steamdeck.local 'bash -s -- v0.5.0' < install.sh
+ssh deck@steamdeck.local 'bash -s -- v0.5.1' < install.sh
 ```
 
 The installer copies the plugin to `~/homebrew/plugins/steamos-remote` and
@@ -42,7 +42,7 @@ is unavailable, use Decky’s **Reload Plugins** action.
 The installer can also be run directly on the Deck:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.0
+curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.1
 ```
 
 ## Device modes
@@ -51,7 +51,8 @@ On first launch, choose the role that matches the device:
 
 - **Client** controls one saved remote device. Discovery is an explicit,
   bounded local-network scan; manual HTTPS entry is available when discovery
-  is not suitable.
+  is not suitable. Display settings show common resolutions and refresh rates
+  by default; Settings has an opt-in toggle for uncommon modes.
 - **Server** accepts authenticated requests from paired clients and keeps the
   Decky display bridge alive while the settings panel is closed.
 - **Both** enables both roles independently.
