@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -46,9 +45,14 @@ def build() -> Path:
     source = HOST / "frontend/index.js"
     target_js = HOST / "dist/index.js"
     target_js.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, target_js)
     package = json.loads((HOST / "package.json").read_text())
     version = package["version"]
+    # Keep the source bundle usable in the test harness while stamping the
+    # exact package version into release artifacts. The frontend also reads
+    # the backend diagnostics version, so this is only a fallback for a
+    # loader that starts the UI before its first backend response.
+    source_text = source.read_text(encoding="utf-8")
+    target_js.write_text(source_text.replace("__STEAMOS_REMOTE_VERSION__", version), encoding="utf-8")
     output = ROOT / "artifacts"
     output.mkdir(exist_ok=True)
     archive_path = output / f"steamos-remote-decky-{version}.zip"

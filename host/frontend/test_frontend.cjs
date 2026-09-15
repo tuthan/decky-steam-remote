@@ -78,6 +78,8 @@ function readVarint(bytes, start) {
   let sunshineStatusCalls = 0;
   let sunshineRestartCalls = 0;
   let loaderConnectCalls = 0;
+  let legacyPluginCalls = 0;
+  const updateFetches = [];
   const results = [];
 
   const dm = {
@@ -118,8 +120,38 @@ function readVarint(bytes, start) {
       },
       __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: {
         connect(version, pluginName) {
+          assert.ok(version === 2 || version === 1);
+          if (pluginName === "SteamOS Remote") {
+            return {
+              call(methodName, ...args) {
+                if (methodName === "get_settings") {
+                  return Promise.resolve({
+                    mode: {effective: "server"},
+                    device_mode: "server",
+                    settings: {monitor_sunshine: true},
+                    diagnostics: {version: "0.5.1"},
+                  });
+                }
+                if (methodName === "report_bridge_snapshot") {
+                  snapshotReported = true;
+                  return Promise.resolve({accepted: true});
+                }
+                if (methodName === "next_bridge_command") {
+                  return Promise.resolve(snapshotReported ? commands.shift() || null : null);
+                }
+                if (methodName === "report_bridge_result") {
+                  results.push({command_id: args[0], result: args[1]});
+                  return Promise.resolve({accepted: true});
+                }
+                if (methodName === "report_sunshine_owner") {
+                  assert.ok(args[0] && typeof args[0].available === "boolean");
+                  return Promise.resolve({ready: true});
+                }
+                throw new Error(`unexpected modern backend method ${methodName}`);
+              },
+            };
+          }
           loaderConnectCalls++;
-          assert.equal(version, 1);
           assert.equal(pluginName, "Decky Sunshine");
           return {
             call(methodName) {
@@ -152,7 +184,36 @@ function readVarint(bytes, start) {
     {command_id: "bridge-sunshine-status", operation_id: "op-sunshine-status", kind: "sunshine_status", payload: {}},
     {command_id: "bridge-sunshine-restart", operation_id: "op-sunshine-restart", kind: "sunshine_restart", payload: {}},
   ];
-  const plugin = factory({callPluginMethod: async (method, args = {}) => {
+  const plugin = factory({
+    fetchNoCors: async (url, options = {}) => {
+      updateFetches.push({url, options});
+      if (url.endsWith("/releases/latest")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            tag_name: "v0.5.1",
+            draft: false,
+            prerelease: false,
+            html_url: "https://github.com/tuthan/decky-steam-remote/releases/tag/v0.5.1",
+            assets: [
+              {name: "steamos-remote-decky-0.5.1.zip", browser_download_url: "https://github.com/tuthan/decky-steam-remote/releases/download/v0.5.1/steamos-remote-decky-0.5.1.zip", size: 100},
+              {name: "steamos-remote-decky-0.5.1.zip.sha256", browser_download_url: "https://github.com/tuthan/decky-steam-remote/releases/download/v0.5.1/steamos-remote-decky-0.5.1.zip.sha256", size: 100},
+            ],
+          }),
+        };
+      }
+      return {ok: true, status: 200, text: async () => `${"a".repeat(64)}  steamos-remote-decky-0.5.1.zip\n`};
+    },
+    callPluginMethod: async (method, args = {}) => {
+    legacyPluginCalls++;
+    if (method === "get_settings") {
+      return {success: true, result: {
+        mode: {effective: "server"},
+        device_mode: "server",
+        settings: {monitor_sunshine: true},
+      }};
+    }
     if (method === "report_bridge_snapshot") {
       snapshotReported = true;
       return {success: true, result: {accepted: true}};
@@ -169,9 +230,16 @@ function readVarint(bytes, start) {
       return {success: true, result: {ready: true}};
     }
     throw new Error(`unexpected backend method ${method}`);
-  }});
+    },
+  });
 
   await new Promise(resolve => realSetTimeout(resolve, 250));
+  assert.equal(plugin.icon.type, "svg", "the plugin should expose a native SVG icon");
+  assert.equal(plugin.icon.props["aria-label"], "SteamOS Remote");
+  assert.equal(plugin.icon.children[0].type, "g", "the plugin icon should use a monochrome glyph");
+  assert.equal(plugin.icon.children[0].props.stroke, "#f2f4f5");
+  assert.equal(updateFetches.length, 2, "the updater should fetch the release and checksum through Decky");
+  assert.equal(updateFetches[0].options.headers["X-GitHub-Api-Version"], "2022-11-28");
   plugin.onDismount();
   assert.equal(modeWrites, 1, "the bridge must apply the advertised mode once");
   assert.equal(suspendCalls, 1, "the bridge must invoke suspend only for a fixed power command");
@@ -187,7 +255,8 @@ function readVarint(bytes, start) {
   assert.equal(results[4].result.running, false);
   assert.equal(results[5].result.ok, true);
   assert.equal(loaderConnectCalls, 0, "the legacy owner route must be preferred for Decky Sunshine");
+  assert.equal(legacyPluginCalls, 0, "API-v1 backend calls should use the positional loader API");
   assert.ok(sunshineStatusCalls >= 2, "the bridge must probe and monitor through Decky Sunshine");
   assert.equal(sunshineRestartCalls, 1, "the bridge must invoke the owner restart method only for a fixed command");
-  console.log("PASS: production Decky bridge decodes state, preserves display generations, invokes power actions, and delegates Sunshine to its owner");
+  console.log("PASS: production Decky bridge uses API v1, validates OTA metadata, decodes state, preserves display generations, invokes power actions, and delegates Sunshine to its owner");
 })().catch(error => { console.error(error); process.exitCode = 1; });

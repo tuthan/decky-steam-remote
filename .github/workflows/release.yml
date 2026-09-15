@@ -41,6 +41,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_*.py' -v
           python3 -m compileall -q host protocol
           node --check host/frontend/index.js
+          node host/frontend/test_frontend.cjs
 
       - name: Build release assets
         run: python3 host/build.py

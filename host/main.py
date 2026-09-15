@@ -86,8 +86,8 @@ async def _threaded_call(method: str, function, *args, **kwargs):
 
 
 class Plugin:
-    # Keep the class attribute: legacy Decky API-v0 still passes the Plugin
-    # class as self instead of instantiating it.  The coordinator itself is
+    # Keep the class attribute for API-v0 installations that pass the Plugin
+    # class as self. API-v1 instantiates this class; the coordinator itself is
     # API-version agnostic and gates host/client lifecycles.
     service = _build_service()
 

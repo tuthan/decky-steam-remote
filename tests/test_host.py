@@ -325,6 +325,36 @@ class HostTests(unittest.TestCase):
         finally:
             temp.cleanup()
 
+    def test_disabled_sunshine_monitor_does_not_poll_its_provider(self):
+        class FakeSunshine:
+            provider_name = "fake-sunshine"
+            contract_version = "test-1"
+
+            def __init__(self):
+                self.status_calls = 0
+
+            def get_status(self):
+                self.status_calls += 1
+                return {"running": True}
+
+            def ensure_running(self):
+                raise AssertionError("disabled monitoring must not recover Sunshine")
+
+        temp, service = self.make_service()
+        provider = FakeSunshine()
+        try:
+            service.set_sunshine_provider(provider)
+            credential = self.pair(service)
+            headers = {"Authorization": "Bearer " + credential["token"]}
+            status, _, value = service.handle_http("GET", "/v1/status", headers)
+            self.assertEqual(status, 200)
+            self.assertFalse(service.monitor.is_enabled())
+            self.assertEqual(value["sunshine"]["state"], "disabled")
+            self.assertEqual(provider.status_calls, 0)
+        finally:
+            service.stop()
+            temp.cleanup()
+
     def test_client_can_revoke_its_credential(self):
         temp, service = self.make_service()
         try:

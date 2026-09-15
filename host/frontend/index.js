@@ -72,6 +72,7 @@
   let knownPendingPairings = null;
   let sunshineOwnerTimer = null;
   let sunshineOwnerBusy = false;
+  let sunshineMonitoringEnabled = false;
   let runtimeRole = "unknown";
   let runtimeReady = false;
   let runtimeStartPromise = null;
@@ -93,7 +94,71 @@
     start: "startSunshine",
   });
   const LOADER_API_KEY = "__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit";
+  const PLUGIN_NAME = "SteamOS Remote";
+  const BUILD_VERSION = "__STEAMOS_REMOTE_VERSION__";
+  const LOADER_API_VERSION = 2;
+  const UPDATE_REPOSITORY = "tuthan/decky-steam-remote";
+  const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
+  const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const UPDATE_MIN_CHECK_INTERVAL_MS = 30 * 1000;
+  const UPDATE_INSTALL_TYPE = 2; // Decky's PluginInstallType.UPDATE.
+  const UPDATE_ASSET_PREFIX = "steamos-remote-decky-";
+  const BACKEND_ARGUMENTS = Object.freeze({
+    get_settings: [],
+    update_settings: ["changes"],
+    set_device_mode: ["mode", "client_name"],
+    cancel_mode_change: [],
+    dismiss_upgrade_notice: [],
+    create_pairing: ["requested_scopes"],
+    create_pairing_code: ["requested_scopes"],
+    list_pairings: [],
+    approve_pairing: ["pairing_id", "scopes"],
+    reject_pairing: ["pairing_id"],
+    revoke_client: ["client_id"],
+    set_sunshine_provider: ["provider"],
+    report_sunshine_owner: ["report"],
+    next_bridge_command: [],
+    report_bridge_result: ["command_id", "result"],
+    report_bridge_snapshot: ["snapshot"],
+    discover_remote_devices: ["port", "endpoints"],
+    begin_discovery: ["port", "endpoints"],
+    poll_discovery: ["scan_id"],
+    cancel_discovery: ["scan_id"],
+    check_remote_device: ["host", "port"],
+    request_remote_pairing: ["candidate", "requested_scopes", "replace_existing"],
+    poll_remote_pairing: ["pending_id"],
+    cancel_remote_pairing: ["pending_id"],
+    use_staged_remote: ["use"],
+    remote_status: [],
+    remote_outputs: [],
+    remote_action_availability: ["action", "output_id", "mode_id"],
+    remote_power: ["action"],
+    remote_preview: ["output_id", "mode_id", "generation"],
+    remote_confirm_preview: ["preview_id", "visible"],
+    remote_restore: ["source", "profile_id"],
+    remote_save_current: ["output_id", "generation"],
+    remote_sunshine_restart: [],
+    check_remote_operation: ["action_id"],
+    resend_remote_operation: ["action_id", "acknowledge_earlier_may_have_run"],
+    wake_remote: [],
+    rename_remote: ["alias"],
+    update_remote_endpoint: ["candidate"],
+    forget_remote: ["revoke"],
+    local_status: [],
+  });
   let sunshineOwnerAPI = null;
+  let pluginBackendAPI = null;
+  let pluginBackendAPIAttempted = false;
+  let updateCheckTimer = null;
+  let updateCheckPromise = null;
+  let updateState = {
+    status: "idle",
+    currentVersion: null,
+    release: null,
+    error: null,
+    checkedAt: null,
+  };
+  const updateListeners = new Set();
 
   function steamSystem() { return window.SteamClient?.System || initialSystem; }
   function displayManager() { return steamSystem()?.DisplayManager || initialDisplayManager; }
@@ -114,6 +179,219 @@
       if (typeof DeckyBackend !== "undefined" && typeof DeckyBackend.call === "function") return DeckyBackend;
     } catch (_) {}
     return null;
+  }
+
+  function loaderPluginAPI() {
+    if (pluginBackendAPI && typeof pluginBackendAPI.call === "function") return pluginBackendAPI;
+    if (pluginBackendAPIAttempted) return null;
+    pluginBackendAPIAttempted = true;
+    const init = window[LOADER_API_KEY];
+    if (!init || typeof init.connect !== "function") return null;
+    let lastError = null;
+    for (const version of [LOADER_API_VERSION, 1]) {
+      try {
+        const api = init.connect(version, PLUGIN_NAME);
+        if (api && typeof api.call === "function") {
+          pluginBackendAPI = api;
+          return api;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    // Older loaders only expose the API-v0 serverAPI object. The caller falls
+    // back to it below; do not make a transient compatibility error prevent
+    // the plugin from loading.
+    if (lastError) console.warn(tag, "Decky Loader plugin API unavailable", boundedString(lastError));
+    return null;
+  }
+
+  function updateCurrentVersion(value) {
+    const candidate = value?.diagnostics?.version || value?.version || value;
+    const version = normalizeVersion(candidate) || normalizeVersion(BUILD_VERSION);
+    if (!version || updateState.currentVersion === version) return;
+    updateState = {...updateState, currentVersion: version};
+    for (const listener of updateListeners) {
+      try { listener(updateState); } catch (_) {}
+    }
+  }
+
+  function normalizeVersion(value) {
+    const text = String(value ?? "").trim().replace(/^v/i, "");
+    const match = text.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
+    if (!match) return null;
+    const core = match.slice(1, 4).map(Number);
+    if (core.some(value => !Number.isSafeInteger(value) || value < 0)) return null;
+    if (match.slice(1, 4).some(value => value.length > 1 && value.startsWith("0"))) return null;
+    if (match[4] && match[4].split(".").some(value => !value || (/^0\d/.test(value)))) return null;
+    return `${core[0]}.${core[1]}.${core[2]}${match[4] ? `-${match[4]}` : ""}`;
+  }
+
+  function compareVersions(left, right) {
+    const a = normalizeVersion(left);
+    const b = normalizeVersion(right);
+    if (!a || !b) return null;
+    const parse = value => {
+      const [core, pre = ""] = value.split("-");
+      return {core: core.split(".").map(Number), pre: pre ? pre.split(".") : []};
+    };
+    const parsedA = parse(a);
+    const parsedB = parse(b);
+    for (let index = 0; index < 3; index++) {
+      if (parsedA.core[index] !== parsedB.core[index]) return parsedA.core[index] > parsedB.core[index] ? 1 : -1;
+    }
+    if (!parsedA.pre.length && !parsedB.pre.length) return 0;
+    if (!parsedA.pre.length) return 1;
+    if (!parsedB.pre.length) return -1;
+    const count = Math.max(parsedA.pre.length, parsedB.pre.length);
+    for (let index = 0; index < count; index++) {
+      const leftPart = parsedA.pre[index];
+      const rightPart = parsedB.pre[index];
+      if (leftPart === undefined) return -1;
+      if (rightPart === undefined) return 1;
+      if (leftPart === rightPart) continue;
+      const leftNumeric = /^\d+$/.test(leftPart);
+      const rightNumeric = /^\d+$/.test(rightPart);
+      if (leftNumeric && rightNumeric) return Number(leftPart) > Number(rightPart) ? 1 : -1;
+      if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+      return leftPart > rightPart ? 1 : -1;
+    }
+    return 0;
+  }
+
+  function publishUpdate(patch) {
+    updateState = {...updateState, ...patch};
+    for (const listener of updateListeners) {
+      try { listener(updateState); } catch (_) {}
+    }
+    return updateState;
+  }
+
+  function subscribeUpdates(listener) {
+    updateListeners.add(listener);
+    return () => updateListeners.delete(listener);
+  }
+
+  function updateFetch(url, options = {}) {
+    const api = loaderPluginAPI();
+    if (api && typeof api.fetchNoCors === "function") return api.fetchNoCors(url, options);
+    if (typeof serverAPI?.fetchNoCors === "function") return serverAPI.fetchNoCors(url, options);
+    if (typeof fetch === "function") return fetch(url, options);
+    throw new Error("Decky network API is unavailable");
+  }
+
+  function canCheckUpdates() {
+    return Boolean(
+      typeof serverAPI?.fetchNoCors === "function"
+      || typeof pluginBackendAPI?.fetchNoCors === "function"
+      || typeof fetch === "function"
+    );
+  }
+
+  function validReleaseAsset(asset, expectedName) {
+    if (!asset || asset.name !== expectedName || typeof asset.browser_download_url !== "string") return null;
+    const prefix = `https://github.com/${UPDATE_REPOSITORY}/releases/download/`;
+    if (!asset.browser_download_url.startsWith(prefix)) return null;
+    return {name: asset.name, url: asset.browser_download_url, size: Number(asset.size) || null};
+  }
+
+  async function checkForUpdate(force = false) {
+    if (updateCheckPromise) return updateCheckPromise;
+    const now = Date.now();
+    if (!force && updateState.checkedAt && now - updateState.checkedAt < UPDATE_MIN_CHECK_INTERVAL_MS) return updateState;
+    if (!canCheckUpdates()) return publishUpdate({status: "unavailable", error: "Decky network API is unavailable"});
+    updateCheckPromise = (async () => {
+      publishUpdate({status: "checking", error: null});
+      try {
+        const response = await timeout(updateFetch(UPDATE_API_URL, {
+          method: "GET",
+          headers: {
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+        }), 10000);
+        if (!response || response.ok === false || (Number(response.status) >= 400)) throw new Error(`GitHub release lookup failed (${response?.status || "unknown"})`);
+        const release = typeof response.json === "function" ? await response.json() : null;
+        if (!release || release.draft === true || release.prerelease === true) throw new Error("GitHub returned no stable release");
+        const version = normalizeVersion(release.tag_name);
+        if (!version) throw new Error("GitHub release tag is not a semantic version");
+        const expectedArchive = `${UPDATE_ASSET_PREFIX}${version}.zip`;
+        const archive = validReleaseAsset((release.assets || []).find(item => item?.name === expectedArchive), expectedArchive);
+        const checksumName = `${expectedArchive}.sha256`;
+        const checksumAsset = validReleaseAsset((release.assets || []).find(item => item?.name === checksumName), checksumName);
+        if (!archive || !checksumAsset) throw new Error(`Release is missing ${expectedArchive} or its SHA256 asset`);
+        const checksumResponse = await timeout(updateFetch(checksumAsset.url, {method: "GET"}), 10000);
+        if (!checksumResponse || checksumResponse.ok === false || Number(checksumResponse.status) >= 400) throw new Error("Release checksum could not be downloaded");
+        const checksumText = typeof checksumResponse.text === "function" ? await checksumResponse.text() : "";
+        if (checksumText.length > 4096) throw new Error("Release checksum is unexpectedly large");
+        const checksumMatch = checksumText.match(/^\s*([a-fA-F0-9]{64})\s+(?:\*?)(\S+)\s*$/m);
+        if (!checksumMatch || checksumMatch[2] !== expectedArchive) throw new Error("Release checksum is malformed");
+        const current = updateState.currentVersion || normalizeVersion(BUILD_VERSION);
+        const comparison = compareVersions(version, current);
+        if (comparison === null) throw new Error("Installed version is not a semantic version");
+        const safeReleaseUrl = typeof release.html_url === "string" && release.html_url.startsWith(`https://github.com/${UPDATE_REPOSITORY}/releases/`) ? release.html_url : `https://github.com/${UPDATE_REPOSITORY}/releases/tag/${encodeURIComponent(release.tag_name)}`;
+        const details = {
+          tag: boundedString(release.tag_name, 64),
+          version,
+          zipUrl: archive.url,
+          sha256: checksumMatch[1].toLowerCase(),
+          releaseUrl: safeReleaseUrl,
+          notes: boundedString(release.body, 2048),
+          publishedAt: boundedString(release.published_at, 64),
+          size: archive.size,
+        };
+        return publishUpdate({
+          status: comparison > 0 ? "available" : "current",
+          release: comparison > 0 ? details : null,
+          error: null,
+          checkedAt: Date.now(),
+        });
+      } catch (error) {
+        return publishUpdate({status: "error", release: null, error: boundedString(error), checkedAt: Date.now()});
+      } finally {
+        updateCheckPromise = null;
+      }
+    })();
+    return updateCheckPromise;
+  }
+
+  function startUpdateWatcher() {
+    if (updateCheckTimer || !canCheckUpdates()) return;
+    void checkForUpdate();
+    updateCheckTimer = setInterval(() => { void checkForUpdate(); }, UPDATE_CHECK_INTERVAL_MS);
+  }
+
+  function stopUpdateWatcher() {
+    if (updateCheckTimer) clearInterval(updateCheckTimer);
+    updateCheckTimer = null;
+  }
+
+  async function installUpdate() {
+    const release = updateState.release;
+    if (!release || !/^[a-f0-9]{64}$/.test(release.sha256)) throw new Error("No verified update is available");
+    const loader = deckyBackend();
+    if (!loader) throw new Error("Decky installer API is unavailable; use Decky's Install Plugin from ZIP action");
+    const reply = await timeout(loader.call(
+      "utilities/install_plugin",
+      release.zipUrl,
+      PLUGIN_NAME,
+      release.version,
+      release.sha256,
+      UPDATE_INSTALL_TYPE,
+    ), 10000);
+    if (reply?.success === false) throw new Error(boundedString(reply.result || "Decky rejected the update"));
+    publishUpdate({status: "installing", error: null});
+    const toaster = serverAPI?.toaster;
+    if (typeof toaster?.toast === "function") {
+      try { toaster.toast({title: "SteamOS Remote update", body: `Decky is ready to install v${release.version}. Confirm the Decky installation prompt.`, duration: 8000}); } catch (_) {}
+    }
+    return {requested: true, version: release.version};
+  }
+
+  function useUpdateState() {
+    const [value, setValue] = React.useState(updateState);
+    React.useEffect(() => subscribeUpdates(setValue), []);
+    return value;
   }
 
   function sunshineLoaderAPI() {
@@ -156,14 +434,16 @@
   }
 
   async function connectSunshineOwner() {
-    if (stopped || sunshineOwnerBusy) return;
+    if (stopped || !sunshineMonitoringEnabled || sunshineOwnerBusy) return;
     sunshineOwnerBusy = true;
     try {
       const running = ownerRunningValue(await callSunshineOwner(SUNSHINE_OWNER_METHODS.status));
       if (running === null) throw new Error("Decky Sunshine returned an invalid status");
+      if (stopped || !sunshineMonitoringEnabled) return;
       await callBackend("report_sunshine_owner", {report: {available: true, owner: SUNSHINE_OWNER_PLUGIN}});
       console.info(tag, "connected to Decky Sunshine owner");
     } catch (error) {
+      if (stopped || !sunshineMonitoringEnabled) return;
       const reason = boundedString(error);
       console.warn(tag, "Decky Sunshine owner unavailable", reason);
       try { await callBackend("report_sunshine_owner", {report: {available: false, reason}}); } catch (_) {}
@@ -177,7 +457,7 @@
     sunshineOwnerAPI = null;
     lastSnapshotAt = 0;
     void readSnapshot("resume", true);
-    void connectSunshineOwner();
+    if (sunshineMonitoringEnabled) void connectSunshineOwner();
   }
 
   if (typeof window.addEventListener === "function") {
@@ -197,10 +477,25 @@
     driverTimer = null;
     if (pairingWatchTimer) clearInterval(pairingWatchTimer);
     pairingWatchTimer = null;
+    stopSunshineOwnerWatcher();
+    knownPendingPairings = null;
+  }
+
+  function stopSunshineOwnerWatcher() {
     if (sunshineOwnerTimer) clearInterval(sunshineOwnerTimer);
     sunshineOwnerTimer = null;
-    knownPendingPairings = null;
     sunshineOwnerAPI = null;
+  }
+
+  function setSunshineMonitoring(enabled) {
+    const next = enabled === true;
+    if (sunshineMonitoringEnabled === next) return;
+    sunshineMonitoringEnabled = next;
+    if (!next) {
+      stopSunshineOwnerWatcher();
+    } else if (runtimeReady && roleHasServer(runtimeRole)) {
+      startSunshineOwnerWatcher();
+    }
   }
 
   function startServerRuntime() {
@@ -470,9 +765,22 @@
 
   async function callBackend(method, args = {}) {
     try {
-      const reply = await timeout(serverAPI.callPluginMethod(method, args), 5000);
-      if (reply?.success === false) throw new Error(boundedString(reply.result));
-      return reply && Object.prototype.hasOwnProperty.call(reply, "result") ? reply.result : reply;
+      const modern = loaderPluginAPI();
+      let reply;
+      if (modern) {
+        const names = BACKEND_ARGUMENTS[method] || [];
+        const values = names.map(name => args && Object.prototype.hasOwnProperty.call(args, name) ? args[name] : undefined);
+        reply = await timeout(modern.call(method, ...values), 5000);
+      } else {
+        if (typeof serverAPI?.callPluginMethod !== "function") throw new Error("Decky plugin backend API is unavailable");
+        reply = await timeout(serverAPI.callPluginMethod(method, args), 5000);
+      }
+      // API-v0 wraps plugin results in {success, result}; API-v1 returns the
+      // plugin result directly. Keep accepting both shapes for installations
+      // that reload the frontend before the backend has been upgraded.
+      if (reply?.success === false && Object.prototype.hasOwnProperty.call(reply, "result")) throw new Error(boundedString(reply.result));
+      if (reply?.success === true && Object.prototype.hasOwnProperty.call(reply, "result")) return reply.result;
+      return reply;
     } catch (error) {
       // Do not log args: pairing payloads and client tokens must stay private.
       logBackendFailure(method, error);
@@ -526,7 +834,7 @@
   }
 
   function startSunshineOwnerWatcher() {
-    if (sunshineOwnerTimer) return;
+    if (!sunshineMonitoringEnabled || sunshineOwnerTimer) return;
     void connectSunshineOwner();
     sunshineOwnerTimer = setInterval(() => { void connectSunshineOwner(); }, 10000);
   }
@@ -538,6 +846,8 @@
       let nextRole = "setup";
       try {
         value = await callBackend("get_settings");
+        updateCurrentVersion(value);
+        setSunshineMonitoring(value?.settings?.monitor_sunshine === true);
         const effective = value?.mode?.effective ?? value?.device_mode;
         nextRole = effective === "client" || effective === "server" || effective === "both" ? effective : "setup";
       } catch (_) {
@@ -548,6 +858,7 @@
         nextRole = "server";
       }
       setRuntimeRole(nextRole);
+      startUpdateWatcher();
       return runtimeRole;
     })();
     return runtimeStartPromise;
@@ -696,6 +1007,7 @@
     async function load() {
       try {
         const value = await callBackend("get_settings");
+        setSunshineMonitoring(value?.settings?.monitor_sunshine === true);
         setSettings(value);
         if (!draftDirtyRef.current) {
           setAddress(value?.settings?.listen_address || "0.0.0.0");
@@ -1047,6 +1359,7 @@
 
   function ClientContent() {
     const initialName = "SteamOS handheld";
+    const update = useUpdateState();
     const [settings, setSettings] = React.useState(null);
     const [view, setView] = React.useState("loading");
     const [message, setMessage] = React.useState("");
@@ -1086,6 +1399,8 @@
     async function loadSettings() {
       try {
         const value = await callBackend("get_settings");
+        updateCurrentVersion(value);
+        setSunshineMonitoring(value?.settings?.monitor_sunshine === true);
         applyRole(value);
         setSettings(value);
         const client = value?.client || {};
@@ -1392,6 +1707,7 @@
 
     function renderOverview() {
       const status = remote?.status || {};
+      const remoteSunshineEnabled = status.sunshine?.enabled === true;
       const connection = remote?.connection?.reachable === false ? "Can't reach" : status.protocol_version ? "Connected" : "Checking device…";
       const stale = remote?.last_checked_at && Date.now() - Date.parse(remote.last_checked_at) > 15000;
       const profile = (remote?.profiles || [])[0];
@@ -1402,7 +1718,7 @@
         React.createElement(PanelSectionRow, {focusKey: "remote.wake"}, React.createElement(Button, {label: "Wake device", disabled: Boolean(busy), onClick: () => void run("wake_remote", {}, "Wake packet sent · Waiting for connection…"), focusKey: "remote.wake"})),
         React.createElement(PanelSectionRow, {focusKey: "remote.display"}, React.createElement(Button, {label: "Display settings  >", onClick: () => navigate("display"), focusKey: "remote.display"})),
         React.createElement(PanelSectionRow, {focusKey: "remote.power"}, React.createElement(Button, {label: "Power options  >", onClick: () => navigate("power"), focusKey: "remote.power"})),
-        status.sunshine?.enabled && React.createElement(PanelSectionRow, {focusKey: "remote.sunshine"}, React.createElement(Text, null, `Sunshine ${status.sunshine.state || "unknown"}`), status.sunshine.state === "stopped" && React.createElement(Button, {label: "Recover Sunshine", onClick: async () => {if (await ensureAvailable("sunshine_restart")) void run("remote_sunshine_restart", {}, "Sunshine recovery requested");}, focusKey: "remote.sunshine.recover"})),
+        remoteSunshineEnabled && React.createElement(PanelSectionRow, {focusKey: "remote.sunshine"}, React.createElement(Text, null, `Sunshine ${status.sunshine.state || "unknown"}`), status.sunshine.state === "stopped" && React.createElement(Button, {label: "Recover Sunshine", onClick: async () => {if (await ensureAvailable("sunshine_restart")) void run("remote_sunshine_restart", {}, "Sunshine recovery requested");}, focusKey: "remote.sunshine.recover"})),
         React.createElement(PanelSectionRow, {focusKey: "remote.details"}, React.createElement(Button, {label: "Connection details  >", onClick: () => navigate("details"), focusKey: "remote.details"}))
       );
     }
@@ -1525,6 +1841,61 @@
       return roleHasClient(mode) ? "remote" : "this-device";
     }
 
+    function updateStatusText() {
+      if (update.status === "checking") return "Checking GitHub for a newer release…";
+      if (update.status === "installing") return "Decky is preparing the update. Confirm its installation prompt.";
+      if (update.status === "available" && update.release) return `Version ${update.release.version} is available.`;
+      if (update.status === "current") return `You are running the latest release (v${update.currentVersion || "unknown"}).`;
+      if (update.status === "unavailable") return "Automatic update checks are unavailable in this Decky session.";
+      if (update.status === "error") return `Update check failed: ${update.error || "unknown error"}`;
+      return "Updates are checked automatically when the plugin starts and periodically while Decky is running.";
+    }
+
+    function renderUpdates() {
+      const release = update.release;
+      return React.createElement(PanelSection, {title: "Updates"},
+        React.createElement(PanelSectionRow, {focusKey: "settings.updates.status"}, React.createElement(Text, {live: true}, updateStatusText()),
+          update.checkedAt && React.createElement(Text, {muted: true}, `Last checked ${new Date(update.checkedAt).toLocaleString()}`)),
+        React.createElement(PanelSectionRow, {focusKey: "settings.updates.check"}, React.createElement(Button, {
+          label: "Check for updates",
+          disabled: Boolean(busy) || update.status === "checking" || update.status === "installing",
+          onClick: async () => {
+            setBusy("check_for_update");
+            setMessage("");
+            try {
+              await checkForUpdate(true);
+              if (updateState.status === "current") setMessage("SteamOS Remote is up to date.");
+            } catch (error) {
+              setMessage(boundedString(error));
+            } finally {
+              setBusy("");
+            }
+          },
+          focusKey: "settings.updates.check",
+        })),
+        release && React.createElement(PanelSectionRow, {focusKey: "settings.updates.install"},
+          React.createElement(Text, null, `Verified release ${release.tag}`),
+          release.notes && React.createElement(Text, {muted: true}, release.notes),
+          React.createElement(Button, {
+            label: `Install v${release.version}`,
+            disabled: Boolean(busy) || update.status === "installing",
+            onClick: async () => {
+              setBusy("install_update");
+              setMessage("");
+              try {
+                await installUpdate();
+              } catch (error) {
+                setMessage(boundedString(error));
+              } finally {
+                setBusy("");
+              }
+            },
+            focusKey: "settings.updates.install",
+          })
+        )
+      );
+    }
+
     function renderUpgradeNotice() {
       if (!settings?.client?.upgrade_notice || !roleHasServer(mode)) return null;
       return React.createElement(PanelSectionRow, {focusKey: "upgrade.client-available"},
@@ -1585,6 +1956,7 @@
           React.createElement(PanelSectionRow, {focusKey: "settings.display-preferences.explanation"}, React.createElement(Text, null, "Display preferences"), React.createElement(Text, {muted: true}, "Keep uncommon resolutions and refresh rates hidden for a shorter, safer mode list.")),
           React.createElement(PanelSectionRow, {focusKey: "settings.display-preferences.toggle"}, React.createElement(ToggleRow, {label: "Show non-standard display modes", description: "Also show uncommon resolutions and refresh rates. The current mode is always shown.", checked: showNonstandard, disabled: Boolean(busy), onClick: () => void run("update_settings", {changes: {show_nonstandard_display_modes: !showNonstandard}}, showNonstandard ? "Non-standard display modes hidden" : "Non-standard display modes shown"), focusKey: "settings.display-preferences.toggle"}))
         ),
+        renderUpdates(),
         React.createElement(PanelSection, {title: "Server"},
           React.createElement(PanelSectionRow, {focusKey: "settings.listen"}, React.createElement(Text, null, server.listener?.running ? "Accepting connections" : "Server paused"), React.createElement(Button, {label: server.listener?.running ? "Pause accepting connections" : "Accept connections", disabled: Boolean(busy) || !roleHasServer(mode), onClick: () => void run("update_settings", {changes: {listen_enabled: !server.listener?.running}}), focusKey: "settings.listen"})),
           React.createElement(PanelSectionRow, {focusKey: "settings.address"}, React.createElement(Text, {muted: true}, `Address: ${server.listener?.address || "all interfaces"}:${server.listener?.port || 18443}`)),
@@ -1628,16 +2000,36 @@
     );
   }
 
+  function PluginIcon() {
+    if (!React) return null;
+    return React.createElement("svg", {
+      viewBox: "0 0 64 64",
+      width: 32,
+      height: 32,
+      fill: "none",
+      role: "img",
+      "aria-label": "SteamOS Remote",
+      focusable: "false",
+    },
+    React.createElement("g", {fill: "none", stroke: "#f2f4f5", strokeLinecap: "round", strokeLinejoin: "round"},
+      React.createElement("rect", {x: 8, y: 10, width: 34, height: 25, rx: 5, strokeWidth: 4}),
+      React.createElement("rect", {x: 22, y: 29, width: 34, height: 25, rx: 5, strokeWidth: 4}),
+      React.createElement("path", {d: "M16 42h18m-6-6 6 6-6 6", strokeWidth: 4}),
+      React.createElement("path", {d: "M17 27h15M31 46h16", strokeWidth: 3, opacity: "0.78"})
+    ));
+  }
+
   return {
     name: "SteamOS Remote",
-    icon: React ? React.createElement("span", null, "R") : null,
+    icon: PluginIcon(),
     content: React ? React.createElement(ClientContent) : null,
     onDismount() {
       stopped = true;
+      stopUpdateWatcher();
       stopServerRuntime();
       if (driverTimer) clearTimeout(driverTimer);
       if (pairingWatchTimer) clearInterval(pairingWatchTimer);
-      if (sunshineOwnerTimer) clearInterval(sunshineOwnerTimer);
+      stopSunshineOwnerWatcher();
       if (typeof window.removeEventListener === "function") {
         for (const eventName of wakeEventNames) window.removeEventListener(eventName, wakeBridge);
       }

@@ -2,7 +2,7 @@
   "name": "SteamOS Remote",
   "author": "SteamOS Remote",
   "flags": [],
-  "api_version": 0,
+  "api_version": 1,
   "publish": {
     "tags": ["remote", "client", "server", "display", "power"],
     "description": "Authenticated LAN Client, Server, or Both plugin for SteamOS Remote."

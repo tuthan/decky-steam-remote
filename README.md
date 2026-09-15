@@ -20,6 +20,16 @@ Decky Loader must already be installed.
 
 No reboot or Decky service restart is required.
 
+### Updates
+
+The plugin checks the latest stable GitHub release when it starts and every
+six hours while Decky is running. From **Settings → Updates**, you can inspect
+the release metadata and request an install. The release assets and SHA256
+value are validated before the request is sent to Decky Loader; Decky then
+downloads the ZIP, verifies it, asks for confirmation, replaces the plugin,
+fixes permissions, and reloads it.
+This keeps the plugin itself unprivileged and avoids `sudo` or a root flag.
+
 ### SSH
 
 From a local checkout, install the latest release with:
@@ -31,7 +41,7 @@ ssh deck@steamdeck.local 'bash -s' < install.sh
 To install a specific release:
 
 ```sh
-ssh deck@steamdeck.local 'bash -s -- v0.5.1' < install.sh
+ssh deck@steamdeck.local 'bash -s -- v0.5.2' < install.sh
 ```
 
 The installer copies the plugin to `~/homebrew/plugins/steamos-remote` and
@@ -42,7 +52,7 @@ is unavailable, use Decky’s **Reload Plugins** action.
 The installer can also be run directly on the Deck:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.1
+curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.2
 ```
 
 ## Device modes
@@ -83,7 +93,8 @@ local pairing does not silently revoke server access; the Connection details
 flow explains that distinction.
 
 Sunshine monitoring is disabled by default and can only be enabled locally in
-Decky settings.
+Decky settings. When it is disabled, the server does not probe Decky Sunshine
+and paired clients hide Sunshine status and recovery controls.
 
 The installable frontend is dependency-free: it uses the native Decky
 component surface when the loader exposes it and retains semantic, accessible
@@ -96,8 +107,8 @@ Update the version in `host/package.json`, commit the change, and push a
 matching tag:
 
 ```sh
-git tag v0.5.1
-git push origin v0.5.1
+git tag v0.5.2
+git push origin v0.5.2
 ```
 
 The `Release` workflow runs the checks, builds the ZIP and SHA256 file, and
@@ -112,6 +123,7 @@ Run the checks and build locally:
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m compileall -q host protocol
 node --check host/frontend/index.js
+node host/frontend/test_frontend.cjs
 python3 host/build.py
 ```
 
