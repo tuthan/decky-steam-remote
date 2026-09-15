@@ -41,7 +41,7 @@ ssh deck@steamdeck.local 'bash -s' < install.sh
 To install a specific release:
 
 ```sh
-ssh deck@steamdeck.local 'bash -s -- v0.5.2' < install.sh
+ssh deck@steamdeck.local 'bash -s -- v0.5.3' < install.sh
 ```
 
 The installer copies the plugin to `~/homebrew/plugins/steamos-remote` and
@@ -52,7 +52,7 @@ is unavailable, use Decky’s **Reload Plugins** action.
 The installer can also be run directly on the Deck:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.2
+curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.3
 ```
 
 ## Device modes
@@ -107,8 +107,8 @@ Update the version in `host/package.json`, commit the change, and push a
 matching tag:
 
 ```sh
-git tag v0.5.2
-git push origin v0.5.2
+git tag v0.5.3
+git push origin v0.5.3
 ```
 
 The `Release` workflow runs the checks, builds the ZIP and SHA256 file, and

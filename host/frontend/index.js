@@ -2003,19 +2003,17 @@
   function PluginIcon() {
     if (!React) return null;
     return React.createElement("svg", {
-      viewBox: "0 0 64 64",
-      width: 32,
-      height: 32,
+      viewBox: "0 0 24 24",
+      width: 24,
+      height: 24,
       fill: "none",
       role: "img",
       "aria-label": "SteamOS Remote",
       focusable: "false",
     },
-    React.createElement("g", {fill: "none", stroke: "#f2f4f5", strokeLinecap: "round", strokeLinejoin: "round"},
-      React.createElement("rect", {x: 8, y: 10, width: 34, height: 25, rx: 5, strokeWidth: 4}),
-      React.createElement("rect", {x: 22, y: 29, width: 34, height: 25, rx: 5, strokeWidth: 4}),
-      React.createElement("path", {d: "M16 42h18m-6-6 6 6-6 6", strokeWidth: 4}),
-      React.createElement("path", {d: "M17 27h15M31 46h16", strokeWidth: 3, opacity: "0.78"})
+    React.createElement("g", {fill: "none", stroke: "#f2f4f5", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round"},
+      React.createElement("rect", {x: 3, y: 4, width: 18, height: 13, rx: 2}),
+      React.createElement("path", {d: "M8 10.5h8m-3-3 3 3-3 3M12 17v3m-4 0h8"})
     ));
   }
 

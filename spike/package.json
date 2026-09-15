@@ -1,6 +1,0 @@
-{
-  "name": "steamos-remote-spike",
-  "version": "0.0.6",
-  "private": true,
-  "description": "No-build diagnostic frontend using Decky's existing legacy compatibility API"
-}
