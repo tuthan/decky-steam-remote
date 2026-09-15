@@ -54,6 +54,7 @@ DEFAULT_SETTINGS = {
     "listen_address": "0.0.0.0",
     "listen_port": 18443,
     "advertised_host": "",
+    "device_name": "SteamOS device",
     "monitor_sunshine": False,
 }
 
@@ -343,6 +344,7 @@ class HostService:
         if self._running:
             return self.get_local_status()
         self._running = True
+        self.bridge.start()
         self._preview_stop.clear()
         # Generate/revalidate identity material in the service worker before
         # the settings RPC is polled. Status reads remain non-blocking.
@@ -523,6 +525,11 @@ class HostService:
         if "advertised_host" in changes:
             host = changes["advertised_host"]
             validated["advertised_host"] = "" if host in (None, "") else validate_host(host)
+        if "device_name" in changes:
+            name = changes["device_name"]
+            if not isinstance(name, str) or not name.strip() or len(name.strip()) > 96:
+                raise ApiError("device_name must be a non-empty string of at most 96 characters")
+            validated["device_name"] = " ".join(name.replace("\x00", "").split())[:96]
         if "monitor_sunshine" in changes:
             if not isinstance(changes["monitor_sunshine"], bool):
                 raise ApiError("monitor_sunshine must be boolean")
@@ -635,6 +642,20 @@ class HostService:
     def list_pairings(self) -> list[dict[str, Any]]:
         self._prune_pairings()
         return [self._public_pairing(value) for value in self.store.get("pairings", {}).values()]
+
+    def expire_pending_pairings(self) -> int:
+        """Expire unauthenticated requests when the Server role is removed."""
+        expired: list[str] = []
+        with self._pairing_lock:
+            def expire(state: dict[str, Any]) -> None:
+                for pairing_id, value in state.setdefault("pairings", {}).items():
+                    if isinstance(value, dict) and value.get("status") in {"created", "pending"}:
+                        value["status"] = "expired"
+                        expired.append(pairing_id)
+            self.store.mutate(expire)
+            for pairing_id in expired:
+                self._approved_tokens.pop(pairing_id, None)
+        return len(expired)
 
     def approve_pairing(self, pairing_id: str, scopes: Any = None) -> dict[str, Any]:
         pairing_id = identifier(pairing_id, "pairing_id")
@@ -789,7 +810,7 @@ class HostService:
             raise ApiError("route is not supported", 404, "not_found")
         body = validate_route_body(method, path, body)
         if method == "POST" and path == "/v1/pair/request":
-            if peer_address is not None and not channel_binding:
+            if peer_address is not None and not channel_binding and not body.get("pairing_session"):
                 raise ApiError("TLS channel binding is unavailable; pairing must use a direct TLS connection", 503, "pairing_transport_unavailable")
             binding_header = next(
                 (
@@ -812,6 +833,18 @@ class HostService:
                 channel_binding=channel_binding,
                 client_channel_binding=client_channel_binding,
             )
+        if method == "GET" and path == "/v1/discovery":
+            tls = self._ensure_tls_material()
+            if not tls.get("ready") or not tls.get("fingerprint"):
+                raise ApiError("host certificate is not ready", 503, "tls_unavailable")
+            settings = self.store.get("settings", {})
+            return 200, {}, {
+                "protocol_version": 1,
+                "service": "steamos-remote",
+                "host_id": self.host_id,
+                "certificate_fingerprint": tls["fingerprint"],
+                "name": settings.get("device_name") if isinstance(settings.get("device_name"), str) else None,
+            }
         if method == "GET" and path == "/v1/status":
             client = self._authenticate(headers, "status.read", peer_address)
             return 200, {}, self.status_for(client["client_id"], client["scopes"])
@@ -838,6 +871,8 @@ class HostService:
             return self._display_confirm(client, body)
         if path == "/v1/display/restore":
             return self._display_restore(client, body)
+        if path == "/v1/display/save-current":
+            return self._display_save_current(client, body)
         if path == "/v1/sunshine/restart":
             return self._sunshine_restart(client, body)
         raise ApiError("route is not supported", 404, "not_found")
@@ -1096,7 +1131,7 @@ class HostService:
                 "suspend": "available" if bridge_seen and methods.get("suspend") else "unavailable",
                 "restart": "available" if bridge_seen and methods.get("restart") else "unavailable",
                 "shutdown": "available" if bridge_seen and methods.get("shutdown") else "unavailable",
-                "display_rescue": "available" if ready and methods.get("display") and profiles else ("unavailable" if not ready else "unverified"),
+                "display_rescue": "available" if ready and methods.get("display") else ("unavailable" if not ready else "unverified"),
                 "sunshine_restart": sunshine_capability,
             },
             "sunshine": sunshine,
@@ -1320,6 +1355,52 @@ class HostService:
             if created:
                 self._spawn(operation["id"], lambda: self._run_restore_operation(operation["id"], target))
             return 202, {}, {"protocol_version": 1, "operation": operation}
+
+    def _display_save_current(self, client: dict[str, Any], body: dict[str, Any]) -> tuple[int, dict[str, str], dict[str, Any]]:
+        """Persist the currently displayed mode after an owner assertion.
+
+        A readback by itself is not enough to designate a recovery profile.
+        ``visible=true`` is the explicit statement from the owner that the
+        physical picture is good.  The exact output and generation are still
+        checked against the live bridge before the profile is written.
+        """
+        existing = self.journal.lookup(client["client_id"], request_id(body), body)
+        if existing is not None:
+            target = existing.get("target") if isinstance(existing.get("target"), dict) else {}
+            profiles = self.store.get("profiles", {})
+            profile = profiles.get(target.get("profile_id")) if isinstance(profiles, dict) else None
+            return 202, {}, {"protocol_version": 1, "operation": existing, "profile": self._public_profile(profile or self._latest_profile())}
+        with self._mutation_lock:
+            if body.get("visible") is not True:
+                raise ApiError("visible must be true to save the current display mode", 400, "owner_confirmation_required")
+            if self.store.get("preview") is not None:
+                raise ApiError("a display preview is active; keep or revert it first", 409, "mutation_conflict")
+            snapshot, _ = self.bridge.snapshot()
+            if snapshot is None or not snapshot.get("methods", {}).get("display"):
+                raise ApiError("Steam display bridge is unavailable", 503, "bridge_unavailable")
+            output = self._find_output(snapshot, body["output_id"])
+            if output is None:
+                raise ApiError("output is no longer advertised", 409, "stale_target")
+            if output.get("generation") != body["generation"]:
+                raise ApiError("display target generation is stale", 409, "stale_target")
+            current = self._find_mode(output, output.get("current_mode_id"))
+            if current is None:
+                raise ApiError("current display mode could not be read back", 409, "readback_not_confirmed")
+            created, operation = self.journal.begin(client["client_id"], request_id(body), "display.save-current", body)
+            if created:
+                profile_id = opaque_id("profile-")
+                profile = {
+                    "id": profile_id,
+                    "output_identity": display_identity(output),
+                    "output_id": output["id"],
+                    "mode": current,
+                    "verified_at": _utc_now(),
+                    "verified_by": client["client_id"],
+                }
+                self.store.mutate(lambda state: state.setdefault("profiles", {}).__setitem__(profile_id, profile))
+                self.journal.update(operation["id"], state="succeeded", outcome="current_mode_visible_and_read_back", target={"profile_id": profile_id})
+                operation = self.journal.get(operation["id"], client["client_id"]) or operation
+            return 202, {}, {"protocol_version": 1, "operation": operation, "profile": self._public_profile(self._latest_profile())}
 
     def _run_restore_operation(self, operation_id: str, target: dict[str, Any]) -> None:
         with self._mutation_lock:

@@ -36,7 +36,7 @@ readonly VERSION="${1:-${VERSION:-LATEST}}"
 [[ "${PLUGIN_DIR}" != "/" && "${PLUGIN_DIR}" != "${HOME}" ]] || \
     die "refusing to use an unsafe Decky plugin directory: ${PLUGIN_DIR}"
 
-for command in curl sed head awk mktemp mkdir cp rm; do
+for command in curl sed head awk mktemp mkdir cp rm sudo; do
     command -v "${command}" >/dev/null 2>&1 || die "required command not found: ${command}"
 done
 
@@ -138,9 +138,10 @@ staged_plugin="${staging_dir}/${PLUGIN_NAME}"
 [[ -f "${staged_plugin}/main.py" ]] || die "archive is missing ${PLUGIN_NAME}/main.py"
 
 echo "Installing into ${PLUGIN_DIR}/${PLUGIN_NAME}"
-mkdir -p "${PLUGIN_DIR}" || die "cannot create Decky plugin directory: ${PLUGIN_DIR}"
-rm -rf "${PLUGIN_DIR}/${PLUGIN_NAME}" || die "cannot remove the previous plugin installation"
-cp -a "${staged_plugin}" "${PLUGIN_DIR}/${PLUGIN_NAME}" || die "cannot copy the plugin into ${PLUGIN_DIR}"
+sudo -v || die "sudo authorization is required to install the plugin"
+sudo mkdir -p "${PLUGIN_DIR}" || die "cannot create Decky plugin directory: ${PLUGIN_DIR}"
+sudo rm -rf "${PLUGIN_DIR}/${PLUGIN_NAME}" || die "cannot remove the previous plugin installation"
+sudo cp -a "${staged_plugin}" "${PLUGIN_DIR}/${PLUGIN_NAME}" || die "cannot copy the plugin into ${PLUGIN_DIR}"
 
 echo "Requesting Decky plugin reload"
 if curl --fail --silent --show-error --max-time 5 \

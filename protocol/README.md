@@ -64,3 +64,10 @@ and chooses its own active LAN interface for sending the magic packet.
 The authenticated status response exposes the same wake target and capability
 values for `suspend`, `restart`, and `shutdown`. Power commands remain fixed
 verbs; they do not accept arbitrary system methods or shell commands.
+
+For display recovery, `POST /v1/display/save-current` accepts exactly
+`{request_id, output_id, generation, visible:true}`. The host requires the
+owner confirmation, refuses the request while a preview is active, reads the
+current mode from the live Decky bridge, verifies the output identity and
+generation, and only then persists the mode as the recovery profile. A client
+must never infer a recovery profile from an inventory read alone.

@@ -22,6 +22,7 @@ MUTATING_ROUTES = frozenset({
     "/v1/display/preview",
     "/v1/display/confirm",
     "/v1/display/restore",
+    "/v1/display/save-current",
     "/v1/sunshine/restart",
     "/v1/pair/revoke-self",
 })
@@ -172,18 +173,27 @@ def validate_route_body(method: str, path: str, body: dict[str, Any] | None) -> 
         if action not in {"suspend", "restart", "shutdown"}:
             raise ProtocolError("action is unsupported")
         return body
-    if path in {"/v1/display/preview", "/v1/display/confirm", "/v1/display/restore"}:
+    if path in {"/v1/display/preview", "/v1/display/confirm", "/v1/display/restore", "/v1/display/save-current"}:
         request_id(body)
         if path == "/v1/display/preview":
             identifier(body.get("output_id"), "output_id")
             identifier(body.get("mode_id"), "mode_id")
             generation = body.get("generation")
-            if not isinstance(generation, int) or generation < 0 or generation > 2_147_483_647:
+            if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0 or generation > 2_147_483_647:
                 raise ProtocolError("generation is invalid")
         elif path == "/v1/display/confirm":
             identifier(body.get("preview_id"), "preview_id")
             if body.get("visible") is not True:
                 raise ProtocolError("visible must be true to confirm a display preview")
+        elif path == "/v1/display/save-current":
+            if set(body) != {"request_id", "output_id", "generation", "visible"}:
+                raise ProtocolError("save-current accepts only request_id, output_id, generation, and visible")
+            identifier(body.get("output_id"), "output_id")
+            generation = body.get("generation")
+            if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0 or generation > 2_147_483_647:
+                raise ProtocolError("generation is invalid")
+            if body.get("visible") is not True:
+                raise ProtocolError("visible must be true to save the current display mode")
         else:
             source = body.get("source", "verified")
             if source not in {"verified", "preview"}:

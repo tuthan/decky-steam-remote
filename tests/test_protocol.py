@@ -29,6 +29,18 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             validate_route_body("POST", "/v1/display/preview", {"request_id": "r", "output_id": "1", "mode_id": "2"})
 
+    def test_save_current_requires_owner_confirmation_and_exact_body(self):
+        body = {"request_id": "r", "output_id": "1", "generation": 2, "visible": True}
+        self.assertEqual(validate_route_body("POST", "/v1/display/save-current", body), body)
+        for changed in (
+            {**body, "visible": False},
+            {**body, "profile_id": "profile-1"},
+            {**body, "generation": True},
+        ):
+            with self.subTest(body=changed):
+                with self.assertRaises(ProtocolError):
+                    validate_route_body("POST", "/v1/display/save-current", changed)
+
     def test_pair_request_accepts_exactly_one_bootstrap_form(self):
         common = {"client_id": "client-test", "client_name": "Test", "scopes": ["status.read"]}
         nonce = NONCE_VECTOR

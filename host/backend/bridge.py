@@ -31,8 +31,15 @@ class BridgeBroker:
         with self._lock:
             self._stopped = True
             self._commands.clear()
-            for event, _ in self._pending.values():
+            pending = list(self._pending.values())
+            self._pending.clear()
+            for event, _ in pending:
                 event.set()
+
+    def start(self) -> None:
+        """Re-arm the broker after a role transition or plugin reload."""
+        with self._lock:
+            self._stopped = False
 
     def report_snapshot(self, value: dict[str, Any]) -> dict[str, Any]:
         try:

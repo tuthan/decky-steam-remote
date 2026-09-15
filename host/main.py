@@ -32,7 +32,7 @@ if str(PLUGIN_DIR) not in sys.path:
 
 try:
     from backend import __version__ as BACKEND_VERSION
-    from backend.service import HostService
+    from backend.coordinator import DeviceCoordinator
 except Exception:
     _log("exception", "SteamOS Remote failed to import backend.service")
     raise
@@ -46,21 +46,21 @@ def _state_root() -> Path:
     return Path("/tmp") / "steamos-remote-decky-state"
 
 
-def _build_service() -> HostService:
+def _build_service() -> DeviceCoordinator:
     root = _state_root()
     version = getattr(decky, "DECKY_PLUGIN_VERSION", None) or BACKEND_VERSION
     _log(
         "info",
-        "SteamOS Remote loading version=%s api_version=0 mode=legacy state_root=%s",
+        "SteamOS Remote loading version=%s coordinator state_root=%s",
         version,
         root,
     )
     try:
-        service = HostService(root)
+        service = DeviceCoordinator(root)
     except Exception:
         _log("exception", "SteamOS Remote failed to construct HostService")
         raise
-    _log("info", "SteamOS Remote host identity loaded host_id=%s", service.host_id)
+    _log("info", "SteamOS Remote coordinator loaded host_id=%s mode=%s", getattr(service.host, "host_id", None), service.mode())
     return service
 
 
@@ -70,26 +70,25 @@ def _with_diagnostics(result):
     enriched = dict(result)
     enriched["diagnostics"] = {
         "version": getattr(decky, "DECKY_PLUGIN_VERSION", None) or BACKEND_VERSION,
-        "api_mode": "legacy",
+        "api_mode": "coordinator",
         "log_path": getattr(decky, "DECKY_PLUGIN_LOG", None),
     }
     return enriched
 
 
-async def _threaded_call(method: str, function, *args):
+async def _threaded_call(method: str, function, *args, **kwargs):
     """Run blocking service work while logging failures without request data."""
     try:
-        return await asyncio.to_thread(function, *args)
+        return await asyncio.to_thread(function, *args, **kwargs)
     except Exception:
         _log("exception", "SteamOS Remote RPC failed method=%s", method)
         raise
 
 
 class Plugin:
-    # plugin.json uses the legacy Decky API because the dependency-free
-    # frontend calls the legacy serverAPI.callPluginMethod adapter. In that
-    # mode Decky passes the Plugin class as self instead of instantiating it,
-    # so the service must be a class attribute.
+    # Keep the class attribute: legacy Decky API-v0 still passes the Plugin
+    # class as self instead of instantiating it.  The coordinator itself is
+    # API-version agnostic and gates host/client lifecycles.
     service = _build_service()
 
     async def _main(self):
@@ -116,6 +115,15 @@ class Plugin:
     async def update_settings(self, changes):
         return await _threaded_call("update_settings", self.service.update_settings, changes)
 
+    async def set_device_mode(self, mode, client_name=None):
+        return await _threaded_call("set_device_mode", self.service.set_mode, mode, client_name=client_name)
+
+    async def cancel_mode_change(self):
+        return await _threaded_call("cancel_mode_change", self.service.cancel_mode_change)
+
+    async def dismiss_upgrade_notice(self):
+        return await _threaded_call("dismiss_upgrade_notice", self.service.dismiss_upgrade_notice)
+
     async def create_pairing(self, requested_scopes=None):
         return await _threaded_call("create_pairing", self.service.create_pairing, requested_scopes)
 
@@ -123,31 +131,105 @@ class Plugin:
         return await _threaded_call("create_pairing_code", self.service.create_pairing_code, requested_scopes)
 
     async def list_pairings(self):
-        return self.service.list_pairings()
+        return await _threaded_call("list_pairings", self.service.list_pairings)
 
     async def approve_pairing(self, pairing_id, scopes=None):
-        return self.service.approve_pairing(pairing_id, scopes)
+        return await _threaded_call("approve_pairing", self.service.approve_pairing, pairing_id, scopes)
 
     async def reject_pairing(self, pairing_id):
-        return self.service.reject_pairing(pairing_id)
+        return await _threaded_call("reject_pairing", self.service.reject_pairing, pairing_id)
 
     async def revoke_client(self, client_id):
-        return self.service.revoke_client(client_id)
+        return await _threaded_call("revoke_client", self.service.revoke_client, client_id)
 
     async def set_sunshine_provider(self, provider):
-        return self.service.set_sunshine_provider(provider)
+        return await _threaded_call("set_sunshine_provider", self.service.set_sunshine_provider, provider)
 
     async def report_sunshine_owner(self, report):
-        return self.service.report_sunshine_owner(report)
+        return await _threaded_call("report_sunshine_owner", self.service.report_sunshine_owner, report)
 
     async def next_bridge_command(self):
-        return self.service.next_bridge_command()
+        return await _threaded_call("next_bridge_command", self.service.next_bridge_command)
 
     async def report_bridge_result(self, command_id, result):
-        return self.service.report_bridge_result(command_id, result)
+        return await _threaded_call("report_bridge_result", self.service.report_bridge_result, command_id, result)
 
     async def report_bridge_snapshot(self, snapshot):
-        return self.service.report_bridge_snapshot(snapshot)
+        return await _threaded_call("report_bridge_snapshot", self.service.report_bridge_snapshot, snapshot)
+
+    # Outgoing client RPCs.  Every network method runs in a bounded worker so
+    # a slow remote host cannot block the incoming Steam bridge.
+    async def discover_remote_devices(self, port=18443, endpoints=None):
+        return await _threaded_call("discover_remote_devices", self.service.discover_remote_devices, port, endpoints)
+
+    async def begin_discovery(self, port=18443, endpoints=None):
+        return await _threaded_call("begin_discovery", self.service.begin_discovery, port, endpoints)
+
+    async def poll_discovery(self, scan_id):
+        return await _threaded_call("poll_discovery", self.service.poll_discovery, scan_id)
+
+    async def cancel_discovery(self, scan_id):
+        return await _threaded_call("cancel_discovery", self.service.cancel_discovery, scan_id)
+
+    async def check_remote_device(self, host, port=18443):
+        return await _threaded_call("check_remote_device", self.service.check_remote_device, host, port)
+
+    async def request_remote_pairing(self, candidate, requested_scopes=None, replace_existing=False):
+        return await _threaded_call("request_remote_pairing", self.service.request_remote_pairing, candidate, requested_scopes, replace_existing)
+
+    async def poll_remote_pairing(self, pending_id=None):
+        return await _threaded_call("poll_remote_pairing", self.service.poll_remote_pairing, pending_id)
+
+    async def cancel_remote_pairing(self, pending_id=None):
+        return await _threaded_call("cancel_remote_pairing", self.service.cancel_remote_pairing, pending_id)
+
+    async def use_staged_remote(self, use):
+        return await _threaded_call("use_staged_remote", self.service.use_staged_remote, use)
+
+    async def remote_status(self):
+        return await _threaded_call("remote_status", self.service.remote_status)
+
+    async def remote_outputs(self):
+        return await _threaded_call("remote_outputs", self.service.remote_outputs)
+
+    async def remote_action_availability(self, action, output_id=None, mode_id=None):
+        return await _threaded_call("remote_action_availability", self.service.remote_action_availability, action, output_id, mode_id)
+
+    async def remote_power(self, action):
+        return await _threaded_call("remote_power", self.service.remote_power, action)
+
+    async def remote_preview(self, output_id, mode_id, generation):
+        return await _threaded_call("remote_preview", self.service.remote_preview, output_id, mode_id, generation)
+
+    async def remote_confirm_preview(self, preview_id, visible=True):
+        return await _threaded_call("remote_confirm_preview", self.service.remote_confirm_preview, preview_id, visible)
+
+    async def remote_restore(self, source="verified", profile_id=None):
+        return await _threaded_call("remote_restore", self.service.remote_restore, source, profile_id)
+
+    async def remote_save_current(self, output_id, generation):
+        return await _threaded_call("remote_save_current", self.service.remote_save_current, output_id, generation)
+
+    async def remote_sunshine_restart(self):
+        return await _threaded_call("remote_sunshine_restart", self.service.remote_sunshine_restart)
+
+    async def check_remote_operation(self, action_id):
+        return await _threaded_call("check_remote_operation", self.service.check_remote_operation, action_id)
+
+    async def resend_remote_operation(self, action_id, acknowledge_earlier_may_have_run=False):
+        return await _threaded_call("resend_remote_operation", self.service.resend_remote_operation, action_id, acknowledge_earlier_may_have_run)
+
+    async def wake_remote(self):
+        return await _threaded_call("wake_remote", self.service.wake_remote)
+
+    async def rename_remote(self, alias):
+        return await _threaded_call("rename_remote", self.service.rename_remote, alias)
+
+    async def update_remote_endpoint(self, candidate):
+        return await _threaded_call("update_remote_endpoint", self.service.update_remote_endpoint, candidate)
+
+    async def forget_remote(self, revoke=False):
+        return await _threaded_call("forget_remote", self.service.forget_remote, revoke)
 
     async def local_status(self):
         result = await _threaded_call("local_status", self.service.get_local_status)

@@ -4,7 +4,7 @@
   "flags": [],
   "api_version": 0,
   "publish": {
-    "tags": ["remote", "display", "power"],
-    "description": "Authenticated LAN host for the SteamOS Remote Omarchy client."
+    "tags": ["remote", "client", "server", "display", "power"],
+    "description": "Authenticated LAN Client, Server, or Both plugin for SteamOS Remote."
   }
 }

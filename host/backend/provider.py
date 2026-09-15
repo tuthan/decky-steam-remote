@@ -176,6 +176,12 @@ class SunshineMonitor:
                 self._thread = None
             else:
                 self._stop.clear()
+                if getattr(self._executor, "_shutdown", False):
+                    # A role transition can stop the host monitor and later
+                    # enable Server again on the same service object.
+                    self._executor = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=2, thread_name_prefix="sunshine-provider"
+                    )
                 thread = None
                 if self._thread is None or not self._thread.is_alive():
                     self._thread = threading.Thread(target=self._run, name="sunshine-monitor", daemon=True)
