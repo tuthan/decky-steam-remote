@@ -12,7 +12,10 @@ from typing import Any, Callable
 
 _CONNECTOR_ENTRY_RE = re.compile(r"^card(?P<card>[0-9]+)-(?P<connector>[A-Za-z][A-Za-z0-9_.-]*)$")
 _MODE_RE = re.compile(r"^(?P<width>[1-9][0-9]{0,4})x(?P<height>[1-9][0-9]{0,4})$")
-_MAX_CONNECTORS = 8
+# Display-order responses support up to 16 physical outputs. Keep the DRM
+# inventory bound aligned so multi-port GPUs do not hide an internal panel
+# behind a lexicographically later connector such as eDP-1.
+_MAX_CONNECTORS = 16
 _MAX_MODES = 256
 _MAX_EDID_BYTES = 32 * 1024
 _EDID_HEADER = b"\x00\xff\xff\xff\xff\xff\xff\x00"

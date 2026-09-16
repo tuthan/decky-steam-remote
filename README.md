@@ -45,7 +45,7 @@ Requires Decky Loader.
 - **Decky UI.** Download `steamos-companion-decky-<version>.zip` from Releases
   and install it with Decky's plugin installer.
 - **SSH.** From a local checkout, install the latest release with
-  `ssh deck@steamdeck.local 'bash -s' < install.sh`. Append `-- v0.5.15` to pin a version.
+  `ssh deck@steamdeck.local 'bash -s' < install.sh`. Append `-- v0.5.16` to pin a version.
 - **On the device.**
   `curl -fsSL https://raw.githubusercontent.com/tuthan/steamos-companion-decky/main/install.sh | bash`
 
@@ -77,8 +77,8 @@ python3 host/build.py   # writes artifacts/steamos-companion-decky-<version>.zip
 Bump the version in `host/package.json`, commit, and push a matching tag:
 
 ```sh
-git tag v0.5.15
-git push origin v0.5.15
+git tag v0.5.16
+git push origin v0.5.16
 ```
 
 The `Release` workflow builds the ZIP and SHA256 file and attaches both to the

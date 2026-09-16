@@ -776,6 +776,28 @@ class HostTests(unittest.TestCase):
             self.assertGreater(gone["generation"], first["generation"])
             self.assertNotIn("DP-1", [output["connector"] for output in gone["outputs"]])
 
+    def test_drm_inventory_retains_internal_panel_after_eight_displayport_connectors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(1, 9):
+                connector = root / f"card0-DP-{index}"
+                connector.mkdir()
+                (connector / "status").write_text("connected" if index == 2 else "disconnected", encoding="ascii")
+            internal = root / "card0-eDP-1"
+            internal.mkdir()
+            (internal / "status").write_text("connected", encoding="ascii")
+
+            inventory = DrmInventory(root)
+            snapshot = inventory.snapshot()
+
+            self.assertEqual(len(snapshot["outputs"]), 9)
+            self.assertEqual(snapshot["connected_count"], 2)
+            self.assertEqual(
+                [output["connector"] for output in snapshot["outputs"] if output["connected"]],
+                ["DP-2", "eDP-1"],
+            )
+            self.assertTrue(next(output for output in snapshot["outputs"] if output["connector"] == "eDP-1")["is_internal"])
+
     def test_local_display_uses_drm_connectors_when_steam_reports_gamescope_only(self):
         with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as drm_directory:
             drm_root = Path(drm_directory)
