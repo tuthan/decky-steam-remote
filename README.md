@@ -1,17 +1,25 @@
 # SteamOS Companion
 
 Control and monitor one SteamOS device from another over your local network.
-SteamOS Companion is a [Decky Loader](https://decky.xyz) plugin that runs as a
-**Client**, a **Server**, or **Both**. A matching
-[Omarchy desktop client](https://github.com/tuthan/steamos-companion-omarchy)
-is available for Linux desktops.
+SteamOS Companion is a two-client system that shares one v1 protocol:
 
-**Website:** <https://tuthan.github.io/steamos-companion-decky/> ·
+- **Decky plugin** — runs on SteamOS as a **Client**, **Server**, or **Both**.
+- **Omarchy client** — runs as a Linux desktop bar widget and controls a paired
+  Decky host.
+
+**Website:** <https://steamos-companion.atas.tech/> ·
 **Releases:** <https://github.com/tuthan/steamos-companion-decky/releases>
 
 ![SteamOS Companion This device view](assets/main.png)
 
 ![SteamOS Companion Gaming Mode display order](assets/display-order.png)
+
+## Clients
+
+| Client | Runs on | Role |
+| --- | --- | --- |
+| [SteamOS Companion for Decky](https://github.com/tuthan/steamos-companion-decky) | SteamOS with Decky Loader | Client, Server, or Both |
+| [SteamOS Companion for Omarchy](https://github.com/tuthan/steamos-companion-omarchy) | A Linux desktop with Omarchy | Client for a Decky Server or Both host |
 
 ## What it does
 
@@ -40,7 +48,12 @@ Full contract: [protocol/README.md](protocol/README.md).
 
 ## Install
 
-Requires Decky Loader.
+Choose the client you want to use. The device being controlled must run the
+Decky plugin in **Server** or **Both** mode.
+
+### Decky plugin
+
+Requires [Decky Loader](https://decky.xyz).
 
 - **Decky UI.** Download `steamos-companion-decky-<version>.zip` from Releases
   and install it with Decky's plugin installer.
@@ -49,9 +62,24 @@ Requires Decky Loader.
 - **On the device.**
   `curl -fsSL https://raw.githubusercontent.com/tuthan/steamos-companion-decky/main/install.sh | bash`
 
-On first launch pick a role: Server or Both on the device you want to control,
-Client on the handheld you control it from. Discover the server from the Client
-screen or enter its address, then approve the pairing on the server.
+On first launch pick **Server** or **Both** on the device you want to control,
+or **Client** on the SteamOS device you control it from. Discover the server
+from the Client screen or enter its address, then approve the pairing on the
+server.
+
+### Omarchy desktop client
+
+On a Linux desktop running Omarchy, install the client from its reviewed
+repository:
+
+```sh
+omarchy plugin add https://github.com/tuthan/steamos-companion-omarchy.git --enable
+```
+
+Open the widget's **Settings**, choose **Find hosts**, select the Decky host,
+and request pairing. Compare the code with the one shown by Decky, then approve
+it on the host. The Omarchy client is directory-installed and does not use the
+Decky ZIP or checksum artifact.
 
 ## Repository
 

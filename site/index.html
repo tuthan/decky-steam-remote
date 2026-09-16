@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SteamOS Companion — control one SteamOS device from another</title>
-<meta name="description" content="SteamOS Companion is a Decky Loader plugin that pairs two SteamOS devices over your local network: status, wake, power, display recovery and Gaming Mode display order, over pinned TLS with a comparison code that never leaves either device.">
+<meta name="description" content="SteamOS Companion is a Decky Loader plugin and Omarchy desktop client that pair devices over your local network for status, wake, power, display recovery and Gaming Mode display order, over pinned TLS with a comparison code that never leaves either device.">
 <meta name="theme-color" content="#171a21">
 <meta property="og:type" content="website">
 <meta property="og:title" content="SteamOS Companion">
-<meta property="og:description" content="Control and monitor one SteamOS device from another over your LAN: Steam Deck, other SteamOS handhelds, or a living-room PC. A Decky Loader plugin that runs as Client, Server, or Both.">
+<meta property="og:description" content="Control and monitor a SteamOS device from Decky on SteamOS or the Omarchy desktop client on Linux. Pair once over your LAN for status, wake, power and display recovery.">
 <meta property="og:image" content="https://tuthan.github.io/steamos-companion-decky/assets/deck-client-main.jpeg">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -79,10 +79,10 @@
         <span class="mark" aria-hidden="true"><svg><use href="#i-mark"/></svg></span>
         <span class="wordmark"><span>SteamOS</span><span class="light">Companion</span></span>
       </h1>
-      <p class="hero-tag">Control and monitor one SteamOS device from another over your local network: a Steam Deck, any handheld running SteamOS, or a living-room PC. Pair once, then wake it, change its display, or fix a screen that went dark, from the Quick Access menu.</p>
+      <p class="hero-tag">Control and monitor a SteamOS device from another SteamOS device or an Omarchy Linux desktop over your local network. Pair once, then wake it, change its display, or fix a screen that went dark from Decky or the Omarchy bar.</p>
       <div class="hero-meta">
-        <span class="pill"><span class="dot" aria-hidden="true"></span> Decky Loader plugin</span>
-        <span class="pill">Latest release <code data-version>v0.5.15</code></span>
+        <span class="pill"><span class="dot" aria-hidden="true"></span> Decky + Omarchy clients</span>
+        <span class="pill">Latest release <code data-version>v0.5.16</code></span>
         <span class="pill">MIT licensed</span>
         <a class="pill pill-link" href="#roadmap">Mobile app coming</a>
       </div>
@@ -106,7 +106,7 @@
       <div class="section-head reveal">
         <span class="eyebrow">How pairing works</span>
         <h2 class="section-title">From discovery to a paired device, one step at a time</h2>
-        <p class="section-lede">The SteamOS handheld on the left pairs with a SteamOS living-room PC on the right. Watch what actually crosses the network, and what deliberately never does. Click any step to inspect it.</p>
+      <p class="section-lede">This walkthrough shows a Decky client pairing with a Decky server. The Omarchy desktop client uses the same discovery, certificate pinning and code-comparison flow. Watch what crosses the network, and what deliberately never does.</p>
       </div>
 
       <div class="stage-ctl reveal" id="stage-ctl">
@@ -299,14 +299,14 @@
     <div class="wrap">
       <div class="section-head reveal">
         <span class="eyebrow">Features</span>
-        <h2 class="section-title">Everything one SteamOS device should be able to do for another</h2>
-        <p class="section-lede">Each action is an enumerated operation with a confirmation where it matters. Nothing is replayed silently, and nothing on the wire is a shell command.</p>
+        <h2 class="section-title">Everything one client should be able to do for a SteamOS device</h2>
+        <p class="section-lede">Decky and Omarchy use the same explicit operations. Each action has a confirmation where it matters; nothing is replayed silently, and nothing on the wire is a shell command.</p>
       </div>
 
       <article class="feature reveal">
         <div class="feature-text">
           <h3>Remote device, at a glance</h3>
-          <p>The Remote device view keeps connection state, the saved display mode and the actions you reach for most in one place: restore the saved display, wake the device, change resolution, reorder screens, or send a power command.</p>
+          <p>From the Decky plugin or Omarchy widget, the Remote device view keeps connection state, the saved display mode and the actions you reach for most in one place: restore the saved display, wake the device, change resolution, reorder screens, or send a power command.</p>
           <ul>
             <li>Wake-on-LAN target is saved automatically at pairing time.</li>
             <li>Suspend, restart and shutdown are fixed verbs and always ask for confirmation.</li>
@@ -351,11 +351,11 @@
 
       <article class="feature reveal">
         <div class="feature-text">
-          <h3>Client, Server, or Both</h3>
-          <p>Pick a role on first launch. Changing it later is an explicit saved setting: host identities, listener settings, paired clients and recovery profiles are preserved when a role is added, and a pending display recovery is allowed to finish before the Server role stops.</p>
+          <h3>Decky host, Decky client, or Omarchy client</h3>
+          <p>Install the Decky plugin on SteamOS when a device should host the listener, be controlled, or do both. Install the Omarchy widget on a Linux desktop when you want a desktop client. Decky roles are selected on first launch, and changing them later preserves host identities, listener settings, paired clients and recovery profiles.</p>
           <ul>
             <li>Server keeps the Decky display bridge alive while the panel is closed.</li>
-            <li>A saved outgoing pairing and unresolved operations survive Client mode being disabled.</li>
+            <li>The Omarchy widget is a client; it pairs with a Decky Server or Both host.</li>
             <li>The listener accepts IPv4 on all interfaces by default, with an optional host or IP override.</li>
           </ul>
         </div>
@@ -366,8 +366,8 @@
 
       <article class="feature reveal">
         <div class="feature-text">
-          <h3>Updates without privileges</h3>
-          <p>The plugin checks the latest stable GitHub release on start and every six hours. It validates the release assets and SHA256 before asking Decky Loader to download, verify, confirm and replace the plugin. No <code>sudo</code>, no root flag.</p>
+          <h3>Decky updates without privileges</h3>
+          <p>The Decky plugin checks the latest stable GitHub release on start and every six hours. It validates the release assets and SHA256 before asking Decky Loader to download, verify, confirm and replace the plugin. The Omarchy client is installed from its reviewed repository. No <code>sudo</code>, no root flag.</p>
           <ul>
             <li>Inspect the release metadata under Settings → Updates before requesting an install.</li>
             <li>Sunshine monitoring is off by default and can only be enabled locally in Decky settings.</li>
@@ -440,8 +440,8 @@
     <div class="wrap">
       <div class="section-head reveal">
         <span class="eyebrow">Install</span>
-        <h2 class="section-title">Three ways onto the device</h2>
-        <p class="section-lede">Decky Loader must already be installed. No reboot and no Decky service restart are required.</p>
+        <h2 class="section-title">Install Decky or Omarchy</h2>
+        <p class="section-lede">Install Decky on SteamOS devices that host or participate in the connection, or install the Omarchy widget on a Linux desktop client. No reboot and no Decky service restart are required.</p>
       </div>
 
       <div class="install-grid reveal">
@@ -475,7 +475,7 @@
           </div>
 
           <div class="panel" role="tabpanel" id="panel-omarchy" aria-labelledby="tab-omarchy" hidden>
-            <p>Prefer to drive the Deck from a Linux desktop? The Omarchy bar widget speaks the same v1 protocol and uses only the system Python standard library.</p>
+            <p>Prefer to drive a SteamOS device from a Linux desktop? The Omarchy bar widget is a client for a Decky Server or Both host. It speaks the same v1 protocol and uses only the system Python standard library.</p>
             <pre class="codeblock"><button class="copy" type="button" data-copy>Copy</button>omarchy plugin add https://github.com/tuthan/steamos-companion-omarchy.git --enable</pre>
             <p>Open the widget's Settings, choose <b>Find hosts</b>, request pairing, and approve it on the Deck once the codes match.</p>
           </div>
@@ -485,15 +485,15 @@
           <div class="req">
             <h4>Before you pair</h4>
             <ul>
-              <li><svg class="i"><use href="#i-check"/></svg><span>Decky Loader on the device that will be the server.</span></li>
-              <li><svg class="i"><use href="#i-check"/></svg><span>Both devices on the same local network; the server listens on TCP <code>18443</code>.</span></li>
-              <li><svg class="i"><use href="#i-check"/></svg><span>A second SteamOS device with this plugin, such as a Steam Deck, ROG Ally, Legion Go S or MSI Claw running SteamOS, or a Linux desktop with the Omarchy client.</span></li>
+              <li><svg class="i"><use href="#i-check"/></svg><span>Decky Loader on every SteamOS device that will host or act as a Decky client.</span></li>
+              <li><svg class="i"><use href="#i-check"/></svg><span>Both endpoints on the same local network; the Decky server listens on TCP <code>18443</code>.</span></li>
+              <li><svg class="i"><use href="#i-check"/></svg><span>Choose a second Decky client on SteamOS, or the Omarchy client on a Linux desktop, to control the host.</span></li>
               <li><svg class="i"><use href="#i-check"/></svg><span>Two minutes: the comparison code expires 120 seconds after the request.</span></li>
             </ul>
           </div>
           <div class="req">
             <h4>Verify the download</h4>
-            <p style="margin:0 0 10px;color:var(--text);font-size:15px">Every release ships a <code>.sha256</code> next to the ZIP. The in-plugin updater checks it before handing off to Decky.</p>
+            <p style="margin:0 0 10px;color:var(--text);font-size:15px">Decky releases ship a <code>.sha256</code> next to the ZIP. The in-plugin updater checks it before handing off to Decky; Omarchy is installed from its reviewed repository.</p>
             <pre class="codeblock" style="margin:0"><button class="copy" type="button" data-copy>Copy</button>sha256sum -c steamos-companion-decky-&lt;version&gt;.zip.sha256</pre>
           </div>
         </aside>
@@ -532,8 +532,11 @@
       <div class="faq-slab reveal">
         <h2>General FAQ</h2>
         <dl>
+          <dt>Which client should I install?</dt>
+          <dd>Install the Decky plugin on SteamOS when the device should host the connection, be controlled, or do both. Install the Omarchy widget on a Linux desktop when you want a desktop client for a Decky Server or Both host. They share the same v1 protocol and pairing flow.</dd>
+
           <dt>Do I need two Steam Decks?</dt>
-          <dd>No. Either side can be any device running SteamOS with Decky Loader: a Steam Deck, a handheld such as the ROG Ally, Legion Go S or MSI Claw running SteamOS, or a living-room PC. The client can also be a Linux desktop running the Omarchy client widget. Everything speaks the same v1 protocol.</dd>
+          <dd>No. The Decky plugin can run on any device running SteamOS with Decky Loader: a Steam Deck, a handheld such as the ROG Ally, Legion Go S or MSI Claw running SteamOS, or a living-room PC. A Linux desktop can use the Omarchy widget as the client. Everything speaks the same v1 protocol.</dd>
 
           <dt>Does any traffic leave my network?</dt>
           <dd>No. Discovery is a bounded scan of the local subnet, pairing and control run over HTTPS on your LAN, and wake uses a broadcast magic packet. The only outbound call is the optional check of the latest GitHub release.</dd>
