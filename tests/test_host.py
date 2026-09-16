@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import base64
+import http
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,7 +22,7 @@ from host.backend.identity import ensure_tls_material, read_cpu_temperature
 from host.backend.pairing import decode_payload, derive_pairing_code
 from host.backend.provider import BridgeSunshineProvider, DeckySunshineProcessObserver, ProviderError
 from host.backend.service import HostService, MAX_CLIENTS, MAX_PAIRING_RECORDS, PAIRING_RETENTION_SECONDS
-from host.backend.server import CONNECTION_LIMIT, _ThreadingHTTPServer
+from host.backend.server import CONNECTION_LIMIT, _ThreadingHTTPServer, _restore_system_http_package_path
 from host.backend.storage import StateError, StateStore
 
 
@@ -278,6 +280,15 @@ class HostTests(unittest.TestCase):
 
         self.assertTrue(issubclass(_ThreadingHTTPServer, ThreadingMixIn))
         self.assertEqual(_ThreadingHTTPServer.request_queue_size, CONNECTION_LIMIT)
+
+    def test_decky_frozen_http_package_can_reach_system_server_module(self):
+        with tempfile.TemporaryDirectory() as root:
+            package = Path(root) / "http"
+            package.mkdir()
+            (package / "server.py").write_text("# stdlib fixture\n", encoding="utf-8")
+            with mock.patch.object(http, "__path__", []), mock.patch.object(sys, "path", [root]):
+                _restore_system_http_package_path()
+                self.assertEqual(http.__path__, [str(package)])
 
     def test_pairing_state_is_pruned_and_hard_bounded(self):
         now = [10_000.0]

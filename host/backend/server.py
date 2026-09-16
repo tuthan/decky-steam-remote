@@ -3,14 +3,44 @@
 from __future__ import annotations
 
 import base64
+import http
 import json
 import socket
 import socketserver
 import ssl
+import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+
+def _restore_system_http_package_path() -> None:
+    """Expose stdlib ``http.server`` inside Decky's frozen Python runtime.
+
+    Decky bundles the parent ``http`` package but not every child module.  It
+    also appends the host Python paths after startup; those paths cannot be
+    used for child imports while the frozen parent's ``__path__`` remains
+    authoritative.  Add only an existing stdlib package directory discovered
+    through Decky's own trusted ``sys.path`` entries.
+    """
+    package_path = getattr(http, "__path__", None)
+    if package_path is None:
+        return
+    for entry in sys.path:
+        if not entry:
+            continue
+        candidate = Path(entry) / "http" / "server.py"
+        if candidate.is_file():
+            directory = str(candidate.parent)
+            if directory not in package_path:
+                package_path.append(directory)
+            return
+
+
+_restore_system_http_package_path()
+
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .protocol import MAX_JSON_BYTES, ProtocolError, parse_json_body
 from .service import ApiError, HostService
