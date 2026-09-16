@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .identity import opaque_id
 
@@ -130,6 +130,7 @@ class SunshineMonitor:
     SAMPLE_INTERVAL = 5.0
     STALE_AFTER = 15.0
     PROVIDER_TIMEOUT = 2.0
+    RECOVERY_TIMEOUT = 10.0
 
     def __init__(self, clock=time.monotonic, wall_clock=time.time):
         self.clock = clock
@@ -143,6 +144,18 @@ class SunshineMonitor:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="sunshine-provider")
+        self._state_callback: Callable[[str, str | None], None] | None = None
+
+    def set_state_callback(self, callback: Callable[[str, str | None], None] | None) -> None:
+        """Install a best-effort callback for confirmed sample transitions.
+
+        The callback runs outside the monitor lock and must not be used as a
+        provider-control API. It exists so the host can react once to a
+        running-to-stopped observation without every client implementing its
+        own restart loop.
+        """
+        with self._lock:
+            self._state_callback = callback
 
     def close(self) -> None:
         with self._lock:
@@ -218,28 +231,46 @@ class SunshineMonitor:
             return self.public(include_operation=include_operation)
         status_provider = provider or observer
         if status_provider is None:
-            with self._lock:
-                self._sample = {"state": "unavailable", "checked_monotonic": self.clock(), "checked_at": None, "reason": "Decky Sunshine provider is not connected"}
+            self._publish_sample({
+                "state": "unavailable",
+                "checked_monotonic": self.clock(),
+                "checked_at": None,
+                "reason": "Decky Sunshine provider is not connected",
+            })
             return self.public(include_operation=include_operation)
         try:
             result = self._call(status_provider.get_status)
             now = self.clock()
-            with self._lock:
-                self._sample = {
-                    "state": "running" if result.get("running") else "stopped",
-                    "checked_monotonic": now,
-                    "checked_at": utc_now(),
-                    "reason": result.get("reason") or None,
-                }
+            self._publish_sample({
+                "state": "running" if result.get("running") else "stopped",
+                "checked_monotonic": now,
+                "checked_at": utc_now(),
+                "reason": result.get("reason") or None,
+            })
         except Exception as exc:
-            with self._lock:
-                self._sample = {
-                    "state": "unknown",
-                    "checked_monotonic": self.clock(),
-                    "checked_at": None,
-                    "reason": f"provider status unavailable: {str(exc)[:180]}",
-                }
+            self._publish_sample({
+                "state": "unknown",
+                "checked_monotonic": self.clock(),
+                "checked_at": None,
+                "reason": f"provider status unavailable: {str(exc)[:180]}",
+            })
         return self.public(include_operation=include_operation)
+
+    def _publish_sample(self, sample: dict[str, Any]) -> None:
+        callback: Callable[[str, str | None], None] | None = None
+        previous_state: str | None = None
+        with self._lock:
+            if self._sample is not None:
+                previous_state = self._sample.get("state")
+            self._sample = sample
+            if previous_state != sample.get("state"):
+                callback = self._state_callback
+        if callback is not None:
+            try:
+                callback(str(sample.get("state", "unknown")), previous_state)
+            except Exception:
+                # A host-side reaction must never stop the status monitor.
+                pass
 
     def public(self, *, include_operation: bool = True) -> dict[str, Any]:
         with self._lock:
@@ -295,6 +326,6 @@ class SunshineMonitor:
             self.refresh_now()
             self._stop.wait(self.SAMPLE_INTERVAL)
 
-    def _call(self, function):
+    def _call(self, function, *, timeout: float | None = None):
         future = self._executor.submit(function)
-        return future.result(timeout=self.PROVIDER_TIMEOUT)
+        return future.result(timeout=self.PROVIDER_TIMEOUT if timeout is None else timeout)

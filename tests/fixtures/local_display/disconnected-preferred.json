@@ -1,0 +1,41 @@
+{
+  "ready": true,
+  "generation": 10,
+  "methods": {"display": true, "display_selection": true},
+  "active_output_key": "output:connected",
+  "selection": {"can_switch_live": true, "recovery_available": true, "adapter": "verified-test-adapter"},
+  "outputs": [
+    {
+      "id": "steam-connected",
+      "output_key": "output:connected",
+      "name": "HDMI-A-1",
+      "display_name": "Connected screen",
+      "connector": "HDMI-A-1",
+      "gpu_id": "gpu-0",
+      "connected": true,
+      "active": true,
+      "identity_confidence": "high",
+      "can_switch_live": true,
+      "current_mode_id": "mode-1",
+      "modes": [{"id": "mode-1", "width": 1920, "height": 1080, "refresh_hz": 60}],
+      "generation": 10,
+      "rgb_range": 0
+    },
+    {
+      "id": "steam-disconnected",
+      "output_key": "output:preferred",
+      "name": "DP-1",
+      "display_name": "Preferred screen",
+      "connector": "DP-1",
+      "gpu_id": "gpu-0",
+      "connected": false,
+      "active": false,
+      "identity_confidence": "high",
+      "can_switch_live": true,
+      "current_mode_id": "mode-2",
+      "modes": [{"id": "mode-2", "width": 1920, "height": 1080, "refresh_hz": 60}],
+      "generation": 10,
+      "rgb_range": 0
+    }
+  ]
+}

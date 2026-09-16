@@ -157,6 +157,41 @@ class Plugin:
     async def report_bridge_snapshot(self, snapshot):
         return await _threaded_call("report_bridge_snapshot", self.service.report_bridge_snapshot, snapshot)
 
+    async def local_display_outputs(self):
+        return await _threaded_call("local_display_outputs", self.service.local_display_outputs)
+
+    async def local_display_preview(self, output_key, generation):
+        return await _threaded_call("local_display_preview", self.service.local_display_preview, output_key, generation)
+
+    async def local_display_confirm(self, preview_id):
+        return await _threaded_call("local_display_confirm", self.service.local_display_confirm, preview_id)
+
+    async def local_display_revert(self, preview_id):
+        return await _threaded_call("local_display_revert", self.service.local_display_revert, preview_id)
+
+    async def local_gamescope_output(self, output_key):
+        return await _threaded_call("local_gamescope_output", self.service.local_gamescope_output, output_key)
+
+    async def local_gamescope_outputs(self, output_keys, generation, restart=False):
+        return await _threaded_call("local_gamescope_outputs", self.service.local_gamescope_outputs, output_keys, generation, restart)
+
+    async def local_clear_gamescope_output(self):
+        return await _threaded_call("local_clear_gamescope_output", self.service.local_clear_gamescope_output)
+
+    async def local_gamescope_restart(self):
+        return await _threaded_call("local_gamescope_restart", self.service.local_gamescope_restart)
+
+    # Compatibility aliases for a frontend that was loaded before the plugin
+    # backend was reloaded to v0.5.13.
+    async def local_preferred_monitor(self, output_key):
+        return await _threaded_call("local_preferred_monitor", self.service.local_preferred_monitor, output_key)
+
+    async def local_clear_preferred_monitor(self):
+        return await _threaded_call("local_clear_preferred_monitor", self.service.local_clear_preferred_monitor)
+
+    async def local_sunshine_restart(self):
+        return await _threaded_call("local_sunshine_restart", self.service.local_sunshine_restart)
+
     # Outgoing client RPCs.  Every network method runs in a bounded worker so
     # a slow remote host cannot block the incoming Steam bridge.
     async def discover_remote_devices(self, port=18443, endpoints=None):

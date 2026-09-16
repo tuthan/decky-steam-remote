@@ -12,7 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 from host.backend.bridge import BridgeBroker
-from host.backend.display import DisplayError, resolve_restore_mode, same_mode_profile
+from host.backend.coordinator import CoordinatorError, DeviceCoordinator
+from host.backend.display import DisplayError, normalize_snapshot, resolve_active_output, resolve_restore_mode, same_mode_profile, same_selection_identity
+from host.backend.drm import DrmInventory
+from host.backend.gamescope import GamescopeOutputManager
 from host.backend.identity import ensure_tls_material, read_cpu_temperature
 from host.backend.pairing import decode_payload, derive_pairing_code
 from host.backend.provider import BridgeSunshineProvider, DeckySunshineProcessObserver, ProviderError
@@ -23,6 +26,7 @@ from host.backend.storage import StateError, StateStore
 
 # base64url of 16 fixed bytes; shared with tests/test_protocol.py.
 VERIFICATION_NONCE = "AAECAwQFBgcICQoLDA0ODw"
+LOCAL_FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "local_display"
 
 
 def snapshot(current="3352", generation=4):
@@ -43,12 +47,46 @@ def snapshot(current="3352", generation=4):
     }
 
 
+def local_fixture(name):
+    return json.loads((LOCAL_FIXTURE_ROOT / name).read_text(encoding="utf-8"))
+
+
+def local_switched_snapshot(active_key):
+    value = local_fixture("two-screens.json")
+    value["active_output_key"] = active_key
+    for output in value["outputs"]:
+        output["active"] = output["output_key"] == active_key
+    return value
+
+
+def wait_for_bridge_command(bridge, timeout=2):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        command = bridge.next_command()
+        if command is not None:
+            return command
+        time.sleep(0.005)
+    return None
+
+
+def wait_for_terminal_operation(service, operation_id, timeout=2):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        operation = service.journal.get(operation_id)
+        if operation and operation["state"] in {"observed_return", "succeeded", "failed", "unknown"}:
+            return operation
+        time.sleep(0.01)
+    return service.journal.get(operation_id)
+
+
 class HostTests(unittest.TestCase):
     def make_service(self):
         temp = tempfile.TemporaryDirectory()
         bridge = BridgeBroker()
         bridge.report_snapshot(snapshot())
-        service = HostService(temp.name, bridge=bridge)
+        drm_root = Path(temp.name) / "drm"
+        drm_root.mkdir()
+        service = HostService(temp.name, bridge=bridge, drm_root=drm_root)
         service._tls = {"ready": True, "fingerprint": "sha256:" + "a" * 64}
         return temp, service
 
@@ -317,6 +355,7 @@ class HostTests(unittest.TestCase):
             status, _, value = service.handle_http("GET", "/v1/status", {"Authorization": "Bearer " + credential["token"]})
             self.assertEqual(status, 200)
             self.assertEqual(value["sunshine"]["state"], "disabled")
+            self.assertTrue(service.get_local_status()["settings"]["auto_recover_sunshine"])
             self.assertEqual(value["capabilities"]["suspend"], "available")
             self.assertEqual(value["capabilities"]["restart"], "available")
             self.assertEqual(value["capabilities"]["shutdown"], "available")
@@ -574,6 +613,346 @@ class HostTests(unittest.TestCase):
             service.stop()
             temp.cleanup()
 
+    def test_local_display_inventory_is_explicitly_read_only_without_verified_adapter(self):
+        temp, service = self.make_service()
+        try:
+            local = service.local_display_outputs()
+            self.assertTrue(local["available"])
+            self.assertEqual(local["active_state"], "unknown")
+            self.assertFalse(local["selection"]["can_switch_live"])
+            self.assertFalse(local["selection"]["can_set_startup_preference"])
+            self.assertIn("not verified", local["selection"]["reason"])
+            remote = service.display_outputs("client-test")
+            self.assertNotIn("output_key", remote["outputs"][0])
+            with self.assertRaises(Exception) as error:
+                service.local_display_preview("1", local["generation"])
+            self.assertEqual(error.exception.code, "active_output_unknown")
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_drm_inventory_reads_physical_connectors_and_tracks_topology(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def connector(name, status, modes="", edid=None):
+                path = root / name
+                path.mkdir()
+                (path / "status").write_text(status, encoding="ascii")
+                if modes:
+                    (path / "modes").write_text(modes, encoding="ascii")
+                if edid is not None:
+                    (path / "edid").write_bytes(edid)
+
+            def named_edid(vendor, product_id, name):
+                data = bytearray(128)
+                data[:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+                manufacturer = ((ord(vendor[0]) - 64) << 10) | ((ord(vendor[1]) - 64) << 5) | (ord(vendor[2]) - 64)
+                data[8:10] = manufacturer.to_bytes(2, "big")
+                data[10:12] = product_id.to_bytes(2, "little")
+                descriptor = bytearray(18)
+                descriptor[3] = 0xFC
+                descriptor[5:18] = name.encode("ascii")[:13].ljust(13, b" ")
+                data[54:72] = descriptor
+                return bytes(data)
+
+            connector("card0-HDMI-A-1", "connected", "1920x1080\n1920x1080\n3840x2160\n")
+            connector("card0-HDMI-A-2", "disconnected")
+            connector("card0-DP-1", "connected", "2560x1440\n", named_edid("WAM", 9984, "F270iPRO"))
+            connector("card0-Writeback-1", "connected")
+
+            inventory = DrmInventory(root)
+            first = inventory.snapshot()
+            self.assertIsNotNone(first)
+            self.assertEqual([output["connector"] for output in first["outputs"]], ["DP-1", "HDMI-A-1", "HDMI-A-2"])
+            self.assertEqual(first["outputs"][0]["display_name"], "F270iPRO")
+            self.assertEqual(first["outputs"][0]["monitor_vendor"], "WAM")
+            self.assertEqual(first["outputs"][0]["monitor_product_id"], 9984)
+            self.assertEqual(first["outputs"][0]["description"], "WAM · model 9984")
+            self.assertEqual(first["connected_count"] if "connected_count" in first else sum(output["connected"] for output in first["outputs"]), 2)
+            self.assertEqual(first["outputs"][1]["modes"], [
+                {"id": "drm:card0:HDMI-A-1:mode:1920x1080", "width": 1920, "height": 1080, "refresh_hz": None},
+                {"id": "drm:card0:HDMI-A-1:mode:3840x2160", "width": 3840, "height": 2160, "refresh_hz": None},
+            ])
+            self.assertIsNone(first["active_output_key"])
+            self.assertFalse(first["selection"]["can_switch_live"])
+            initial_generation = first["generation"]
+            self.assertEqual(inventory.snapshot()["generation"], initial_generation)
+
+            (root / "card0-HDMI-A-2" / "status").write_text("connected", encoding="ascii")
+            changed = inventory.snapshot()
+            self.assertGreater(changed["generation"], initial_generation)
+            self.assertTrue(next(output for output in changed["outputs"] if output["connector"] == "HDMI-A-2")["connected"])
+
+    def test_local_display_uses_drm_connectors_when_steam_reports_gamescope_only(self):
+        with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as drm_directory:
+            drm_root = Path(drm_directory)
+            for name, status in (
+                ("card0-HDMI-A-1", "connected"),
+                ("card0-HDMI-A-2", "connected"),
+                ("card0-DP-1", "connected"),
+            ):
+                path = drm_root / name
+                path.mkdir()
+                (path / "status").write_text(status, encoding="ascii")
+            bridge = BridgeBroker()
+            bridge.report_snapshot(snapshot())
+            service = HostService(state_directory, bridge=bridge, drm_root=drm_root)
+            try:
+                local = service.local_display_outputs()
+                self.assertEqual(local["source"], "linux-drm-sysfs")
+                self.assertEqual(local["connected_count"], 3)
+                self.assertEqual([output["connector"] for output in local["outputs"]], ["DP-1", "HDMI-A-1", "HDMI-A-2"])
+                self.assertEqual(local["active_state"], "unknown")
+                self.assertFalse(local["selection"]["can_switch_live"])
+            finally:
+                service.stop()
+
+    def test_local_gamescope_output_routes_a_drm_connector_and_can_clear_it(self):
+        with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as drm_directory, tempfile.TemporaryDirectory() as user_directory, tempfile.TemporaryDirectory() as vendor_directory:
+            drm_root = Path(drm_directory)
+            connector = drm_root / "card0-DP-1"
+            connector.mkdir()
+            (connector / "status").write_text("connected", encoding="ascii")
+            hdmi_connector = drm_root / "card0-HDMI-A-2"
+            hdmi_connector.mkdir()
+            (hdmi_connector / "status").write_text("connected", encoding="ascii")
+            original_script = Path(vendor_directory) / "gamescope-session"
+            original_script.write_text("#!/usr/bin/env bash\nexec gamescope -O '*',eDP-1\n", encoding="utf-8")
+            systemctl_calls = []
+            gamescope = GamescopeOutputManager(
+                state_directory,
+                user_root=user_directory,
+                original_script=original_script,
+                gamescopectl=Path(vendor_directory) / "gamescopectl",
+                systemctl_runner=lambda arguments: systemctl_calls.append(arguments),
+            )
+            bridge = BridgeBroker()
+            bridge.report_snapshot(snapshot())
+            service = HostService(state_directory, bridge=bridge, drm_root=drm_root, gamescope=gamescope)
+            try:
+                response = service.local_gamescope_output("drm:card0:DP-1")
+                operation = response["operation"]
+                self.assertEqual(operation["state"], "succeeded")
+                self.assertEqual(operation["outcome"], "gamescope_output_configured")
+                self.assertEqual(gamescope.configured_connector(), "DP-1")
+                self.assertIn('GAME_MODE_DISPLAY_ORDER="DP-1"', gamescope.script_path.read_text(encoding="utf-8"))
+                self.assertEqual(systemctl_calls, [["daemon-reload"]])
+                self.assertIsNone(bridge.next_command())
+                local = service.local_display_outputs()
+                self.assertEqual(local["monitor_switch"]["configured_connector"], "DP-1")
+                self.assertEqual(local["monitor_switch"]["configured_connectors"], ["DP-1"])
+
+                ordered = service.local_gamescope_outputs(
+                    ["drm:card0:DP-1", "drm:card0:HDMI-A-2"],
+                    local["generation"],
+                    restart=True,
+                )
+                self.assertEqual(ordered["operation"]["state"], "succeeded")
+                self.assertEqual(ordered["operation"]["outcome"], "gamescope_output_configured_and_restart_requested")
+                self.assertEqual(gamescope.configured_connectors(), ["DP-1", "HDMI-A-2"])
+                self.assertEqual(systemctl_calls[-1], ["--no-block", "restart", "gamescope-session.target"])
+
+                cleared = service.local_clear_gamescope_output()
+                self.assertEqual(cleared["operation"]["state"], "succeeded")
+                self.assertEqual(cleared["operation"]["outcome"], "gamescope_output_cleared")
+                self.assertIsNone(gamescope.configured_connector())
+                self.assertEqual(systemctl_calls, [["daemon-reload"], ["daemon-reload"], ["--no-block", "restart", "gamescope-session.target"], ["daemon-reload"]])
+            finally:
+                service.stop()
+
+    def test_local_display_contract_does_not_infer_active_screen(self):
+        known = normalize_snapshot(local_fixture("two-screens.json"))
+        self.assertEqual(resolve_active_output(known["outputs"], known["active_output_key"]), ("output:hdmi-a-1", "known"))
+        unknown = normalize_snapshot(local_fixture("unknown-active.json"))
+        self.assertEqual(resolve_active_output(unknown["outputs"], unknown.get("active_output_key")), (None, "unknown"))
+        ambiguous = normalize_snapshot(local_fixture("ambiguous-active.json"))
+        self.assertEqual(resolve_active_output(ambiguous["outputs"], ambiguous.get("active_output_key")), (None, "ambiguous"))
+        self.assertFalse(same_selection_identity(
+            {"output_key": "output:one", "connector": "HDMI-A-1", "gpu_id": "gpu-0", "identity_confidence": "ambiguous"},
+            {"output_key": "output:one", "connector": "HDMI-A-1", "gpu_id": "gpu-0", "identity_confidence": "ambiguous"},
+        ))
+
+    def test_bridge_topology_generation_is_order_independent(self):
+        bridge = BridgeBroker()
+        first = local_fixture("two-screens.json")
+        bridge.report_snapshot(first)
+        initial, _ = bridge.snapshot()
+        self.assertEqual(initial["generation"], 7)
+        reordered = json.loads(json.dumps(first))
+        reordered["outputs"].reverse()
+        bridge.report_snapshot(reordered)
+        same_topology, _ = bridge.snapshot()
+        self.assertEqual(same_topology["generation"], initial["generation"])
+        changed = json.loads(json.dumps(first))
+        changed["outputs"][1]["modes"].append({"id": "mode-4k-60", "width": 3840, "height": 2160, "refresh_hz": 60})
+        bridge.report_snapshot(changed)
+        next_topology, _ = bridge.snapshot()
+        self.assertGreater(next_topology["generation"], initial["generation"])
+
+    def test_local_display_preview_confirm_uses_active_readback(self):
+        temp = tempfile.TemporaryDirectory()
+        bridge = BridgeBroker()
+        initial = local_fixture("two-screens.json")
+        bridge.report_snapshot(initial)
+        service = HostService(temp.name, bridge=bridge)
+        try:
+            response = service.local_display_preview("output:dp-1", 7)
+            preview_id = response["preview"]["preview_id"]
+            command = wait_for_bridge_command(bridge)
+            self.assertIsNotNone(command)
+            self.assertEqual(command["kind"], "select_output")
+            self.assertEqual(command["payload"], {"output_key": "output:dp-1", "generation": 7})
+            service.report_bridge_result(command["command_id"], {"ok": True, "snapshot": local_switched_snapshot("output:dp-1")})
+            operation = wait_for_terminal_operation(service, response["operation"]["id"])
+            self.assertEqual(operation["state"], "observed_return")
+            self.assertEqual(service.local_display_outputs()["preview"]["state"], "observed_return")
+            confirmed = service.local_display_confirm(preview_id)
+            self.assertEqual(confirmed["operation"]["state"], "succeeded")
+            self.assertIsNone(service.store.get("local_display_preview"))
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_local_display_preview_revert_restores_baseline(self):
+        temp = tempfile.TemporaryDirectory()
+        bridge = BridgeBroker()
+        initial = local_fixture("two-screens.json")
+        bridge.report_snapshot(initial)
+        service = HostService(temp.name, bridge=bridge)
+        try:
+            response = service.local_display_preview("output:dp-1", 7)
+            preview_id = response["preview"]["preview_id"]
+            command = wait_for_bridge_command(bridge)
+            self.assertIsNotNone(command)
+            service.report_bridge_result(command["command_id"], {"ok": True, "snapshot": local_switched_snapshot("output:dp-1")})
+            self.assertEqual(wait_for_terminal_operation(service, response["operation"]["id"])["state"], "observed_return")
+            revert = service.local_display_revert(preview_id)
+            restore_command = wait_for_bridge_command(bridge)
+            self.assertIsNotNone(restore_command)
+            self.assertEqual(restore_command["kind"], "select_output")
+            self.assertEqual(restore_command["payload"], {"output_key": "output:hdmi-a-1", "generation": 7})
+            service.report_bridge_result(restore_command["command_id"], {"ok": True, "snapshot": initial})
+            restored = wait_for_terminal_operation(service, revert["operation"]["id"])
+            self.assertEqual(restored["state"], "succeeded")
+            original = service.journal.get(response["operation"]["id"])
+            self.assertEqual(original["state"], "failed")
+            self.assertEqual(original["restore_state"], "succeeded")
+            self.assertIsNone(service.store.get("local_display_preview"))
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_local_display_reload_reconciles_readback_without_replaying(self):
+        temp = tempfile.TemporaryDirectory()
+        bridge = BridgeBroker()
+        bridge.report_snapshot(local_fixture("two-screens.json"))
+        first = HostService(temp.name, bridge=bridge)
+        try:
+            with mock.patch.object(first, "_spawn"):
+                response = first.local_display_preview("output:dp-1", 7)
+            bridge.report_snapshot(local_switched_snapshot("output:dp-1"))
+        finally:
+            first.stop()
+        second = HostService(temp.name, bridge=bridge)
+        try:
+            status = second.start(start_server=False)
+            preview = status["local_display"]["preview"]
+            self.assertEqual(preview["state"], "observed_return")
+            self.assertIsNotNone(preview["deadline"])
+            self.assertIsNone(bridge.next_command(), "reload reconciliation must not replay the selector")
+        finally:
+            second.stop()
+            temp.cleanup()
+
+    def test_local_display_failed_apply_attempts_baseline_recovery(self):
+        temp = tempfile.TemporaryDirectory()
+        bridge = BridgeBroker()
+        initial = local_fixture("two-screens.json")
+        bridge.report_snapshot(initial)
+        service = HostService(temp.name, bridge=bridge)
+        try:
+            response = service.local_display_preview("output:dp-1", 7)
+            command = wait_for_bridge_command(bridge)
+            self.assertIsNotNone(command)
+            service.report_bridge_result(command["command_id"], {"ok": False, "reason": "verified adapter rejected selection"})
+            restore_command = wait_for_bridge_command(bridge)
+            self.assertIsNotNone(restore_command)
+            self.assertEqual(restore_command["payload"], {"output_key": "output:hdmi-a-1", "generation": 7})
+            service.report_bridge_result(restore_command["command_id"], {"ok": True, "snapshot": initial})
+            operation = wait_for_terminal_operation(service, response["operation"]["id"])
+            self.assertEqual(operation["state"], "failed")
+            self.assertEqual(operation["restore_state"], "succeeded")
+            self.assertTrue(operation["restored"])
+            self.assertIsNone(service.store.get("local_display_preview"))
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_local_display_unknown_and_disconnected_targets_are_rejected(self):
+        for fixture_name, expected_code, target_key, generation in (
+            ("unknown-active.json", "active_output_unknown", "output:two", 8),
+            ("ambiguous-active.json", "active_output_ambiguous", "output:two", 9),
+            ("disconnected-preferred.json", "stale_display_target", "output:preferred", 10),
+        ):
+            temp = tempfile.TemporaryDirectory()
+            bridge = BridgeBroker()
+            bridge.report_snapshot(local_fixture(fixture_name))
+            service = HostService(temp.name, bridge=bridge)
+            try:
+                with self.assertRaises(Exception) as error:
+                    service.local_display_preview(target_key, generation)
+                self.assertEqual(error.exception.code, expected_code, fixture_name)
+            finally:
+                service.stop()
+                temp.cleanup()
+
+    def test_local_display_stale_inventory_is_labelled_and_cannot_mutate(self):
+        now = [0.0]
+        bridge = BridgeBroker(clock=lambda: now[0])
+        bridge.report_snapshot(local_fixture("two-screens.json"))
+        now[0] = 1.0
+        unavailable = {"ready": False, "reason": "DisplayManager temporarily unavailable", "outputs": []}
+        bridge.report_snapshot(unavailable)
+        temp = tempfile.TemporaryDirectory()
+        drm_root = Path(temp.name) / "drm"
+        drm_root.mkdir()
+        service = HostService(temp.name, bridge=bridge, drm_root=drm_root)
+        try:
+            previous = service.local_display_outputs()
+            self.assertFalse(previous["available"])
+            self.assertTrue(previous["previous_reading"])
+            self.assertTrue(previous["stale"])
+            self.assertIn("Previous display reading", previous["reason"])
+            self.assertFalse(previous["selection"]["can_switch_live"])
+            now[0] = 10.0
+            stale = service.local_display_outputs()
+            self.assertFalse(stale["available"])
+            self.assertTrue(stale["previous_reading"])
+            self.assertEqual(len(stale["outputs"]), 2)
+            with self.assertRaises(Exception) as error:
+                service.local_display_preview("output:dp-1", 7)
+            self.assertEqual(error.exception.code, "stale_display_inventory")
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_coordinator_gates_local_display_controls_to_server_or_both(self):
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = DeviceCoordinator(directory)
+            try:
+                with self.assertRaises(CoordinatorError) as error:
+                    coordinator.local_display_outputs()
+                self.assertEqual(error.exception.code, "server_role_required")
+                with self.assertRaises(CoordinatorError) as sunshine_error:
+                    coordinator.local_sunshine_restart()
+                self.assertEqual(sunshine_error.exception.code, "server_role_required")
+                with self.assertRaises(CoordinatorError) as monitor_error:
+                    coordinator.local_preferred_monitor("drm:card0:DP-1")
+                self.assertEqual(monitor_error.exception.code, "server_role_required")
+            finally:
+                coordinator.stop()
+
     def test_private_state_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -623,6 +1002,88 @@ class HostTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(service.journal.get(operation_id, credential["client_id"])["state"], "succeeded")
             self.assertEqual(provider.ensure_calls, 1)
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_sunshine_auto_recovery_is_one_shot_after_a_running_to_stopped_transition(self):
+        class FailingSunshine:
+            provider_name = "failing-sunshine"
+            contract_version = "test-1"
+
+            def __init__(self):
+                self.running = True
+                self.ensure_calls = 0
+
+            def get_status(self):
+                return {"running": self.running}
+
+            def ensure_running(self):
+                self.ensure_calls += 1
+                raise ProviderError("owner plugin refused to start Sunshine")
+
+        temp, service = self.make_service()
+        provider = FailingSunshine()
+        try:
+            service.set_sunshine_provider(provider)
+            service.monitor.SAMPLE_INTERVAL = 60
+            service.update_settings({"monitor_sunshine": True, "auto_recover_sunshine": True})
+            service.monitor.refresh_now()
+            provider.running = False
+            service.monitor.refresh_now()
+            deadline = time.time() + 2
+            while time.time() < deadline and provider.ensure_calls < 1:
+                time.sleep(0.01)
+            self.assertEqual(provider.ensure_calls, 1)
+            # Repeated stopped samples do not create a restart loop after the
+            # bounded owner request has failed.
+            service.monitor.refresh_now()
+            service.monitor.refresh_now()
+            time.sleep(0.05)
+            self.assertEqual(provider.ensure_calls, 1)
+            operations = [
+                value for value in service.store.get("operations", {}).values()
+                if value.get("kind") == "sunshine.restart" and value.get("client_id") == "decky-local"
+            ]
+            self.assertEqual(len(operations), 1)
+            self.assertEqual(operations[0]["state"], "failed")
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_local_sunshine_restart_is_owner_gated_and_reconciles(self):
+        class FakeSunshine:
+            provider_name = "fake-sunshine"
+            contract_version = "test-1"
+
+            def __init__(self):
+                self.running = False
+                self.ensure_calls = 0
+
+            def get_status(self):
+                return {"running": self.running}
+
+            def ensure_running(self):
+                self.ensure_calls += 1
+                self.running = True
+                return {"accepted": True, "outcome": "started"}
+
+        temp, service = self.make_service()
+        provider = FakeSunshine()
+        try:
+            with self.assertRaises(Exception) as unavailable:
+                service.local_sunshine_restart()
+            self.assertEqual(unavailable.exception.code, "provider_unavailable")
+
+            service.set_sunshine_provider(provider)
+            service.update_settings({"monitor_sunshine": True})
+            response = service.local_sunshine_restart()
+            operation_id = response["operation"]["id"]
+            operation = wait_for_terminal_operation(service, operation_id)
+            self.assertEqual(operation["state"], "succeeded")
+            self.assertEqual(operation["outcome"], "running")
+            self.assertEqual(provider.ensure_calls, 1)
+            self.assertEqual(service.get_local_status()["sunshine"]["state"], "running")
         finally:
             service.stop()
             temp.cleanup()
@@ -712,3 +1173,21 @@ class BridgeTests(unittest.TestCase):
         bridge.report_result(command["command_id"], {"ok": True, "running": False})
         thread.join(1)
         self.assertEqual(result["status"], {"running": False, "reason": ""})
+
+        result = {}
+
+        def requester():
+            result["restart"] = provider.ensure_running()
+
+        thread = threading.Thread(target=requester)
+        thread.start()
+        deadline = time.time() + 1
+        command = None
+        while time.time() < deadline and command is None:
+            command = bridge.next_command()
+            time.sleep(0.005)
+        self.assertIsNotNone(command)
+        self.assertEqual(command["kind"], "sunshine_restart")
+        bridge.report_result(command["command_id"], {"ok": True, "outcome": "method_returned"})
+        thread.join(1)
+        self.assertEqual(result["restart"], {"accepted": True, "outcome": "method_returned"})

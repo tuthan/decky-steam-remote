@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import collections
+import json
+import re
 import threading
 import time
 from typing import Any
@@ -25,6 +27,10 @@ class BridgeBroker:
         self._pending: dict[str, tuple[threading.Event, dict[str, Any] | None]] = {}
         self._snapshot: dict[str, Any] | None = None
         self._snapshot_at = 0.0
+        self._last_ready_snapshot: dict[str, Any] | None = None
+        self._last_ready_snapshot_at = 0.0
+        self._topology_signature: str | None = None
+        self._topology_generation = 0
         self._stopped = False
 
     def stop(self) -> None:
@@ -49,6 +55,40 @@ class BridgeBroker:
         with self._lock:
             if self._stopped:
                 raise BridgeError("bridge is stopped")
+            if normalized.get("ready") is True:
+                topology = sorted([
+                    {
+                        "output_key": output.get("output_key"),
+                        "connector": output.get("connector"),
+                        "gpu_id": output.get("gpu_id"),
+                        "display_name": output.get("display_name"),
+                        "monitor_vendor": output.get("monitor_vendor"),
+                        "monitor_product_id": output.get("monitor_product_id"),
+                        "name": output.get("name"),
+                        "description": output.get("description"),
+                        "is_internal": output.get("is_internal"),
+                        "connected": output.get("connected"),
+                        # Steam may re-enumerate mode IDs after a mode or
+                        # connector operation. Generation tracks the
+                        # physical inventory, so compare semantic modes only.
+                        "modes": sorted([
+                            {
+                                "width": mode.get("width"),
+                                "height": mode.get("height"),
+                                "refresh_hz": mode.get("refresh_hz"),
+                            }
+                            for mode in output.get("modes", [])
+                        ], key=lambda mode: (mode["width"], mode["height"], mode["refresh_hz"] or 0)),
+                    }
+                    for output in normalized.get("outputs", [])
+                ], key=lambda output: (str(output.get("output_key", "")), str(output.get("connector", ""))))
+                signature = json.dumps(topology, sort_keys=True, separators=(",", ":"))
+                if self._topology_signature != signature:
+                    self._topology_signature = signature
+                    self._topology_generation = max(self._topology_generation + 1, normalized.get("generation", 0), 1)
+                normalized["generation"] = self._topology_generation
+                self._last_ready_snapshot = self._copy(normalized)
+                self._last_ready_snapshot_at = self._clock()
             self._snapshot = normalized
             self._snapshot_at = self._clock()
             return {"accepted": True, "reported_at": self._snapshot_at}
@@ -62,13 +102,39 @@ class BridgeBroker:
                 return None, age_ms
             return self._copy(self._snapshot), age_ms
 
+    def previous_ready_snapshot(self, max_age: float | None = None) -> tuple[dict[str, Any] | None, int | None]:
+        """Return the last ready inventory for a stale/error UI reading.
+
+        The current snapshot remains authoritative for remote operations. This
+        separate accessor lets the local Decky chooser label an old inventory
+        as previous data instead of silently presenting it as usable state.
+        """
+        with self._lock:
+            if self._last_ready_snapshot is None:
+                return None, None
+            age_ms = max(0, int((self._clock() - self._last_ready_snapshot_at) * 1000))
+            if max_age is not None and age_ms > int(max_age * 1000):
+                return None, age_ms
+            return self._copy(self._last_ready_snapshot), age_ms
+
     def request(self, kind: str, payload: dict[str, Any], operation_id: str, timeout: float = 8.0) -> dict[str, Any]:
-        if kind not in {"set_mode", "power", "sunshine_status", "sunshine_restart"}:
+        if kind not in {"set_mode", "select_output", "set_preferred_monitor", "power", "sunshine_status", "sunshine_restart"}:
             raise BridgeError("unsupported bridge command")
         if not isinstance(payload, dict):
             raise BridgeError("bridge command payload is invalid")
         if kind == "power" and payload.get("action") not in {"suspend", "restart", "shutdown"}:
             raise BridgeError("power action is unsupported")
+        if kind == "select_output":
+            output_key = payload.get("output_key")
+            if not isinstance(output_key, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}", output_key):
+                raise BridgeError("display output target is invalid")
+            generation = payload.get("generation")
+            if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0 or generation > 2_147_483_647:
+                raise BridgeError("display output generation is invalid")
+        if kind == "set_preferred_monitor":
+            monitor_device_name = payload.get("monitor_device_name")
+            if not isinstance(monitor_device_name, str) or len(monitor_device_name) > 128 or not re.fullmatch(r"[A-Za-z0-9_.:-]{0,128}", monitor_device_name):
+                raise BridgeError("preferred monitor target is invalid")
         command_id = opaque_id("bridge-")
         event = threading.Event()
         with self._lock:

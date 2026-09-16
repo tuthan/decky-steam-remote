@@ -226,6 +226,8 @@ class DeviceCoordinator:
             return False
         if self.host.store.get("preview") is not None:
             return True
+        if self.host.store.get("local_display_preview") is not None:
+            return True
         return bool(self.host.journal.active())
 
     def _update_transition(self, transition_id: str, **changes: Any) -> bool:
@@ -362,7 +364,7 @@ class DeviceCoordinator:
             result = self.set_mode(await_mode, client_name=changes.get("client_name"))
         else:
             result = self.get_settings()
-        server_keys = {"listen_enabled", "listen_address", "listen_port", "advertised_host", "monitor_sunshine"}
+        server_keys = {"listen_enabled", "listen_address", "listen_port", "advertised_host", "monitor_sunshine", "auto_recover_sunshine"}
         server_changes = {key: changes[key] for key in server_keys if key in changes}
         if server_changes:
             # Listener configuration is local settings and may be edited before
@@ -406,6 +408,40 @@ class DeviceCoordinator:
 
     def report_bridge_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         return self._require_server().report_bridge_snapshot(snapshot)
+
+    def local_display_outputs(self) -> dict[str, Any]:
+        return self._require_server().local_display_outputs()
+
+    def local_display_preview(self, output_key: str, generation: int) -> dict[str, Any]:
+        return self._require_server().local_display_preview(output_key, generation)
+
+    def local_display_confirm(self, preview_id: str) -> dict[str, Any]:
+        return self._require_server().local_display_confirm(preview_id)
+
+    def local_display_revert(self, preview_id: str) -> dict[str, Any]:
+        return self._require_server().local_display_revert(preview_id)
+
+    def local_gamescope_output(self, output_key: str) -> dict[str, Any]:
+        return self._require_server().local_gamescope_output(output_key)
+
+    def local_gamescope_outputs(self, output_keys: list[str], generation: int, restart: bool = False) -> dict[str, Any]:
+        return self._require_server().local_gamescope_outputs(output_keys, generation, restart)
+
+    def local_clear_gamescope_output(self) -> dict[str, Any]:
+        return self._require_server().local_clear_gamescope_output()
+
+    def local_gamescope_restart(self) -> dict[str, Any]:
+        return self._require_server().local_gamescope_restart()
+
+    # Compatibility aliases for the v0.5.7 frontend/backend method names.
+    def local_preferred_monitor(self, output_key: str) -> dict[str, Any]:
+        return self.local_gamescope_output(output_key)
+
+    def local_clear_preferred_monitor(self) -> dict[str, Any]:
+        return self.local_clear_gamescope_output()
+
+    def local_sunshine_restart(self) -> dict[str, Any]:
+        return self._require_server().local_sunshine_restart()
 
     # Client-side RPCs.
     def discover_remote_devices(self, port: int = 18443, endpoints: list[str] | None = None) -> list[dict[str, Any]]:

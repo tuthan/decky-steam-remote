@@ -1,7 +1,7 @@
 /* SteamOS Remote Decky frontend.
  *
  * The backend owns the LAN API and operation journal. This module is the
- * long-lived Steam bridge: it only calls the fixed DisplayManager/System
+ * long-lived Steam bridge: it only calls fixed DisplayManager/System/Settings
  * methods and the two constant Decky Sunshine owner methods needed by
  * commands delivered by the backend. The bridge is kept
  * alive after the settings view closes so a remote client can still recover a
@@ -15,6 +15,7 @@
   const snapshotPollMs = 2000;
   const initialDisplayManager = window.SteamClient?.System?.DisplayManager;
   const initialSystem = window.SteamClient?.System;
+  const initialSettings = window.SteamClient?.Settings;
   const React = window.SP_REACT;
   // API-v0 exposes React through SP_REACT.  When Decky exposes the native
   // component kit to a legacy bundle, use it directly; the small semantic
@@ -120,6 +121,18 @@
     next_bridge_command: [],
     report_bridge_result: ["command_id", "result"],
     report_bridge_snapshot: ["snapshot"],
+    local_display_outputs: [],
+    local_display_preview: ["output_key", "generation"],
+    local_display_confirm: ["preview_id"],
+    local_display_revert: ["preview_id"],
+    local_gamescope_output: ["output_key"],
+    local_gamescope_outputs: ["output_keys", "generation", "restart"],
+    local_clear_gamescope_output: [],
+    local_gamescope_restart: [],
+    // Keep these names while an older panel instance is still in memory.
+    local_preferred_monitor: ["output_key"],
+    local_clear_preferred_monitor: [],
+    local_sunshine_restart: [],
     discover_remote_devices: ["port", "endpoints"],
     begin_discovery: ["port", "endpoints"],
     poll_discovery: ["scan_id"],
@@ -162,6 +175,7 @@
 
   function steamSystem() { return window.SteamClient?.System || initialSystem; }
   function displayManager() { return steamSystem()?.DisplayManager || initialDisplayManager; }
+  function steamSettings() { return window.SteamClient?.Settings || initialSettings; }
   function powerMethodName(action) { return Object.prototype.hasOwnProperty.call(POWER_METHODS, action) ? POWER_METHODS[action] : null; }
 
   const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -430,6 +444,13 @@
   function ownerRunningValue(value) {
     if (typeof value === "boolean") return value;
     if (value && typeof value === "object" && typeof value.running === "boolean") return value.running;
+    // Decky Sunshine v2025.10.27 returns `result and any(...)` from its
+    // process observer.  When `flatpak ps` succeeds but Sunshine is stopped,
+    // Python returns the empty string rather than the boolean False. Its own
+    // frontend intentionally treats only `true` as running, so preserve that
+    // compatibility without treating null/undefined or arbitrary values as a
+    // trustworthy stopped state.
+    if (value === "") return false;
     return null;
   }
 
@@ -674,6 +695,28 @@
     };
   }
 
+  function decodeMonitorInfo(value) {
+    const payload = value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "reply") ? value.reply : value;
+    const fields = readMessage(bytesFromValue(payload));
+    return {
+      selected_device_name: decodeUtf8(firstBytes(fields, 1)) || "",
+      monitors: allBytes(fields, 2).map(bytes => {
+        const monitorFields = readMessage(bytes);
+        return {
+          monitor_device_name: decodeUtf8(firstBytes(monitorFields, 1)) || "",
+          monitor_display_name: decodeUtf8(firstBytes(monitorFields, 2)) || "",
+        };
+      }).filter(monitor => monitor.monitor_device_name),
+    };
+  }
+
+  async function readPreferredMonitorInfo() {
+    const settings = steamSettings();
+    if (!settings || typeof settings.GetMonitorInfo !== "function") throw new Error("Settings.GetMonitorInfo unavailable");
+    const returned = await timeout(Reflect.apply(settings.GetMonitorInfo, settings, []), 5000);
+    return decodeMonitorInfo(returned);
+  }
+
   function encodeVarint(value) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Steam ID is invalid");
     const bytes = [];
@@ -712,20 +755,41 @@
     const displays = state?.displays || [];
     const currentSystem = steamSystem();
     const currentDisplayManager = displayManager();
+    const currentSettings = steamSettings();
+    const displayReady = Boolean(currentDisplayManager && typeof currentDisplayManager.GetState === "function" && typeof currentDisplayManager.SetMode === "function");
+    const preferredMonitorReady = Boolean(currentSettings && typeof currentSettings.SetPreferredMonitor === "function");
+    const selectionReason = "Live Gaming Mode screen selection is not verified on this SteamOS build.";
     return {
-      ready: Boolean(currentDisplayManager && typeof currentDisplayManager.GetState === "function" && typeof currentDisplayManager.SetMode === "function"),
+      ready: displayReady,
       reason: boundedString(reason),
       methods: {
         suspend: typeof currentSystem?.SuspendPC === "function",
         restart: typeof currentSystem?.RestartPC === "function",
         shutdown: typeof currentSystem?.ShutdownPC === "function",
-        display: Boolean(currentDisplayManager && typeof currentDisplayManager.GetState === "function" && typeof currentDisplayManager.SetMode === "function"),
+        display: displayReady,
+        preferred_monitor: preferredMonitorReady,
+        preferred_monitor_readback: false,
+        // GetState exposes display modes, but this build does not expose a
+        // verified active-connector selector. Keep the local chooser
+        // read-only until a fixed adapter with explicit readback exists.
+        display_selection: false,
       },
       outputs: displays.slice(0, 8).map(display => ({
         id: display.id,
+        output_key: display.id,
         name: display.name,
+        display_name: display.name,
         description: display.description,
         is_internal: display.is_internal,
+        connector: null,
+        gpu_id: null,
+        connected: true,
+        active: null,
+        identity_confidence: "unknown",
+        can_switch_live: false,
+        can_set_startup_preference: false,
+        restart_required: false,
+        recovery_available: false,
         current_mode_id: display.current_mode_id,
         modes: display.modes.slice(0, 256),
         // Steam provides no cross-call generation in this legacy bridge. A
@@ -734,6 +798,17 @@
         generation: snapshotGeneration(display),
         rgb_range: display.rgb_range === 1 || display.rgb_range === 2 ? display.rgb_range : 0,
       })),
+      generation: Math.max(0, ...displays.slice(0, 8).map(display => snapshotGeneration(display))),
+      active_output_key: null,
+      selection: {
+        active_output_key: null,
+        can_switch_live: false,
+        can_set_startup_preference: false,
+        restart_required: false,
+        recovery_available: false,
+        reason: selectionReason,
+        adapter: null,
+      },
       cpu_temperature: null,
       reported_at: new Date().toISOString(),
     };
@@ -916,6 +991,26 @@
         const returned = await timeout(Reflect.apply(currentDisplayManager.SetMode, currentDisplayManager, [payload]), 5000);
         const snapshot = await readSnapshot("mode readback", true);
         result = {ok: true, outcome: "method_returned", returned: serialize(returned), payload_base64: payload, snapshot};
+      } else if (command.kind === "select_output") {
+        // The currently shipped SteamOS DisplayManager surface has no
+        // verified active-connector operation. Do not turn an opaque backend
+        // request into a guessed method name or raw Gamescope invocation.
+        throw new Error("active Gaming Mode screen selection is not verified on this SteamOS build");
+      } else if (command.kind === "set_preferred_monitor") {
+        const settings = steamSettings();
+        const monitorDeviceName = boundedString(command.payload.monitor_device_name, 128);
+        if (!/^[A-Za-z0-9_.:-]{0,128}$/.test(monitorDeviceName)) throw new Error("preferred monitor target is invalid");
+        if (!settings || typeof settings.SetPreferredMonitor !== "function") throw new Error("Settings.SetPreferredMonitor unavailable");
+        const returned = await timeout(Reflect.apply(settings.SetPreferredMonitor, settings, [monitorDeviceName]), 5000);
+        let readback = null;
+        try { readback = await readPreferredMonitorInfo(); } catch (_) {}
+        result = {
+          ok: true,
+          outcome: "preferred_monitor_method_returned",
+          returned: serialize(returned),
+          monitor_device_name: monitorDeviceName,
+          readback,
+        };
       } else if (command.kind === "power") {
         action = boundedString(command.payload.action, 32);
         const methodName = powerMethodName(action);
@@ -1141,7 +1236,9 @@
       draftDirty && React.createElement("button", {onClick: cancelDraft, disabled: busy, style: {display: "block", marginTop: "6px"}}, "Cancel listener edits"),
       React.createElement("h3", null, "Sunshine"),
       React.createElement("label", null, React.createElement("input", {type: "checkbox", checked: settings?.settings?.monitor_sunshine === true, onChange: event => void run(async () => { await callBackend("update_settings", {changes: {monitor_sunshine: event.target.checked}}); })}), " Monitor Sunshine"),
+      React.createElement("label", {style: {display: "block", marginTop: "4px"}}, React.createElement("input", {type: "checkbox", checked: settings?.settings?.auto_recover_sunshine !== false, disabled: settings?.settings?.monitor_sunshine !== true, onChange: event => void run(async () => { await callBackend("update_settings", {changes: {auto_recover_sunshine: event.target.checked}}); })}), " Auto-recover Sunshine"),
       React.createElement("p", null, "When enabled, paired clients can see Decky Sunshine status and request a restart only after the Decky owner bridge confirms it is stopped. A read-only process check may keep status visible during a short reload gap; this plugin never starts a separate Sunshine process."),
+      React.createElement("p", null, "Automatic recovery makes one owner-plugin start request after a running-to-stopped observation. If the owner cannot recover Sunshine, the manual Recover button remains available."),
       React.createElement("p", null, `Provider: ${providerSummary()}`),
       React.createElement("p", null, `Observation: ${sunshineSummary()}`),
       React.createElement("h3", null, "Pairing"),
@@ -1224,11 +1321,12 @@
     return React.createElement("button", props, label);
   }
 
-  function SelectableRow({selected, title, description, onClick, focusKey, autoFocus = false}) {
-    const label = `${selected ? "Selected. " : ""}${title}. ${description}`;
+  function SelectableRow({selected, title, description, onClick, focusKey, autoFocus = false, disabled = false}) {
+    const label = `${selected ? "Selected. " : ""}${disabled ? "Unavailable. " : ""}${title}. ${description}`;
     const props = {
       type: "button",
       onClick,
+      disabled,
       autoFocus,
       focusKey,
       "data-focus-key": focusKey,
@@ -1241,16 +1339,16 @@
         marginTop: "8px",
         padding: "8px",
         textAlign: "left",
-        color: UI_COLORS.text,
+        color: disabled ? UI_COLORS.disabledText : UI_COLORS.text,
         border: selected ? `2px solid ${UI_COLORS.accent}` : `1px solid ${UI_COLORS.border}`,
         borderRadius: "4px",
-        background: selected ? UI_COLORS.surfaceSelected : UI_COLORS.surface,
+        background: disabled ? UI_COLORS.disabledSurface : selected ? UI_COLORS.surfaceSelected : UI_COLORS.surface,
         appearance: "none",
       },
     };
     const content = [
-      React.createElement("strong", {key: "title", style: {display: "block", color: UI_COLORS.text}}, `${selected ? "● " : "○ "}${title}`),
-      React.createElement("span", {key: "description", style: {display: "block", marginTop: "3px", color: UI_COLORS.muted}}, description),
+      React.createElement("strong", {key: "title", style: {display: "block", color: disabled ? UI_COLORS.disabledText : UI_COLORS.text}}, `${selected ? "● " : "○ "}${title}`),
+      React.createElement("span", {key: "description", style: {display: "block", marginTop: "3px", color: disabled ? UI_COLORS.disabledText : UI_COLORS.muted}}, description),
     ];
     if (NativeUI.ButtonItem) return React.createElement(NativeUI.ButtonItem, {...props, layout: "below", highlightOnFocus: true}, ...content);
     if (NativeUI.Focusable) return React.createElement(NativeUI.Focusable, {...props, onActivate: onClick}, ...content);
@@ -1376,6 +1474,8 @@
     const [pendingPairing, setPendingPairing] = React.useState(null);
     const [selectedOutputId, setSelectedOutputId] = React.useState("");
     const [selectedModeId, setSelectedModeId] = React.useState("");
+    const [selectedLocalOutputKey, setSelectedLocalOutputKey] = React.useState("");
+    const [localOutputOrder, setLocalOutputOrder] = React.useState([]);
     const [modal, setModal] = React.useState(null);
     const viewRef = useRef("loading");
     const scanRef = useRef(null);
@@ -1383,6 +1483,7 @@
     const pairingNoticeRef = useRef("");
     const modeDraftTouchedRef = useRef(false);
     const modeDraftInitializedRef = useRef(false);
+    const localOutputOrderTouchedRef = useRef(false);
 
     function navigate(next) {
       viewRef.current = next;
@@ -1444,12 +1545,35 @@
         const value = await callBackend(method, args);
         if (success) setMessage(success);
         await loadSettings();
+        if (method.startsWith("local_display") || method.startsWith("local_gamescope") || method.startsWith("local_preferred")) {
+          await loadLocalDisplay();
+        }
         return value;
       } catch (error) {
         setMessage(boundedString(error));
         return null;
       } finally {
         setBusy("");
+      }
+    }
+
+    async function loadLocalDisplay() {
+      if (!roleHasServer(mode)) return null;
+      try {
+        const value = await callBackend("local_display_outputs");
+        setSettings(previous => previous ? {...previous, local_display: value} : previous);
+        if (!localOutputOrderTouchedRef.current) {
+          const connected = (value?.outputs || []).filter(output => output.connected === true && output.output_key && output.connector);
+          const byConnector = new Map(connected.map(output => [output.connector, output.output_key]));
+          const configured = Array.isArray(value?.monitor_switch?.configured_connectors) ? value.monitor_switch.configured_connectors : [];
+          const configuredKeys = configured.map(connector => byConnector.get(connector)).filter(Boolean);
+          const remainingKeys = connected.map(output => output.output_key).filter(key => !configuredKeys.includes(key));
+          setLocalOutputOrder([...configuredKeys, ...remainingKeys]);
+        }
+        return value;
+      } catch (error) {
+        setMessage(boundedString(error));
+        return null;
       }
     }
 
@@ -1481,6 +1605,14 @@
     const client = settings?.client || {};
     const remote = client.remote;
     const remoteVisible = roleHasClient(mode) && Boolean(remote) && ["remote", "display", "power", "details"].includes(view);
+    const localVisible = roleHasServer(mode) && view === "local-display";
+
+    React.useEffect(() => {
+      if (localVisible) {
+        localOutputOrderTouchedRef.current = false;
+        void loadLocalDisplay();
+      }
+    }, [localVisible]);
 
     React.useEffect(() => {
       if (!remoteVisible) return undefined;
@@ -1589,7 +1721,7 @@
         ...(settings?.setup_complete ? [{id: "settings", label: "Settings"}] : []),
       ];
       return React.createElement(React.Fragment || "div", null,
-        React.createElement("h2", {style: {color: UI_COLORS.text}}, view === "remote" ? "Remote device" : view === "this-device" ? "This device" : "SteamOS Remote"),
+        React.createElement("h2", {style: {color: UI_COLORS.text}}, view === "remote" ? "Remote device" : view === "this-device" ? "This device" : view === "local-display" ? "Active screen" : "SteamOS Remote"),
         React.createElement("nav", {"aria-label": "Destinations", style: {display: "flex", gap: "6px", flexWrap: "wrap", color: UI_COLORS.text}},
           destinations.map(item => React.createElement(Button, {key: item.id, label: item.label, focusKey: `destination.${item.id}`, onClick: () => navigate(item.id)}))
         )
@@ -1817,14 +1949,244 @@
       const listener = server.listener || {};
       const paused = !listener.running;
       const pending = server.pending_pairings || [];
-      const clients = server.clients || [];
+      const clients = [...(server.clients || [])].sort((left, right) => {
+        const rank = item => /omarchy/i.test(item?.name || "") ? 0 : /steam\s*(deck|os)|deck/i.test(item?.name || "") ? 1 : 2;
+        return rank(left) - rank(right) || String(left?.name || "").localeCompare(String(right?.name || ""));
+      });
+      const clientType = item => /omarchy/i.test(item?.name || "") ? "Omarchy" : /steam\s*(deck|os)|deck/i.test(item?.name || "") ? "Steam Deck" : "Client";
+      const clientPermissions = item => (item.scopes || []).map(scope => scope === "status.read" ? "Status" : scope === "power.control" ? "Power" : scope === "display.control" ? "Display" : scope).join(" · ");
+      const sunshine = server.sunshine || {};
+      const sunshineMonitoring = server.settings?.monitor_sunshine === true;
+      const sunshineProviderReady = server.provider?.ready === true;
+      const sunshineRecoverable = sunshineMonitoring && sunshineProviderReady && sunshine.state === "stopped" && !sunshine.operation_id;
+      const sunshineDescription = !sunshineMonitoring
+        ? "Off in Advanced settings."
+        : sunshineProviderReady
+          ? sunshine.state === "stopped"
+            ? "Stopped."
+            : sunshine.state === "running"
+              ? "Running."
+              : sunshine.state === "restarting"
+                ? "Recovery in progress."
+              : sunshine.reason || "Checking status."
+        : server.provider?.reason || sunshine.reason || "Owner bridge unavailable.";
       return React.createElement(PanelSection, {title: "This device"},
         React.createElement(PanelSectionRow, {focusKey: "this-device.status"}, React.createElement(Text, null, "Remote access to this device"), React.createElement(Text, {live: true}, paused ? "Server paused" : `Accepting connections on ${listener.address || "all interfaces"}:${listener.port || 18443}`)),
         React.createElement(PanelSectionRow, {focusKey: "this-device.listener"}, React.createElement(Button, {label: listener.running ? "Pause accepting connections" : "Accept connections", disabled: Boolean(busy), onClick: () => void run("update_settings", {changes: {listen_enabled: !listener.running}}, listener.running ? "Server paused" : "Server listening"), focusKey: "this-device.listener"})),
-        pending.length ? React.createElement(PanelSection, {title: "Pending requests"}, pending.map(item => React.createElement(PanelSectionRow, {key: item.pairing_id, focusKey: `incoming.${item.pairing_id}`}, React.createElement(Text, null, `${item.client_name || "Unknown client"} · This device`), item.verification_code && React.createElement(Text, null, `Compare code: ${item.verification_code}`), React.createElement(Text, {muted: true}, "Approve only when the code matches exactly on both screens."), React.createElement(Button, {label: "Reject", disabled: Boolean(busy), onClick: () => void run("reject_pairing", {pairing_id: item.pairing_id}, "Pairing rejected"), focusKey: `incoming.${item.pairing_id}.reject`, autoFocus: true}), React.createElement(Button, {label: "Approve matching code", disabled: Boolean(busy), onClick: () => void run("approve_pairing", {pairing_id: item.pairing_id, scopes: item.requested_scopes}, "Pairing approved"), focusKey: `incoming.${item.pairing_id}.approve`})))) : React.createElement(PanelSectionRow, {focusKey: "this-device.no-pending"}, React.createElement(Text, null, "No pending pairing request.")),
-        React.createElement(PanelSection, {title: "Paired clients"}, clients.length ? clients.map(item => React.createElement(PanelSectionRow, {key: item.client_id, focusKey: `client.${item.client_id}`}, React.createElement(Text, null, item.name || "Unnamed client"), React.createElement(Text, {muted: true}, item.scopes?.join(", ") || "No permissions"), React.createElement(Button, {label: `Remove ${item.name || "client"}'s access to this device?`, disabled: Boolean(busy), onClick: () => setModal({kind: "revoke", client: item}), focusKey: `client.${item.client_id}.remove`, danger: true}))) : React.createElement(PanelSectionRow, {focusKey: "this-device.no-clients"}, React.createElement(Text, null, "No paired clients."))),
-        React.createElement(PanelSectionRow, {focusKey: "this-device.settings"}, React.createElement(Button, {label: "Advanced server settings  >", onClick: () => navigate("settings"), focusKey: "this-device.settings"})),
+        React.createElement(PanelSectionRow, {focusKey: "this-device.display"}, React.createElement(Button, {label: "Display order  >", onClick: () => navigate("local-display"), focusKey: "this-device.display"})),
+        React.createElement(PanelSectionRow, {focusKey: "this-device.settings"}, React.createElement(Button, {label: "Advanced settings  >", onClick: () => navigate("settings"), focusKey: "this-device.settings"})),
+        React.createElement(PanelSection, {title: "Sunshine"},
+          React.createElement(PanelSectionRow, {focusKey: "this-device.sunshine.status"}, React.createElement(Text, null, `Sunshine ${sunshine.state || "unknown"}`), React.createElement(Text, {muted: true}, sunshineDescription)),
+          sunshineRecoverable && React.createElement(PanelSectionRow, {focusKey: "this-device.sunshine.recover"}, React.createElement(Button, {label: "Recover Sunshine", disabled: Boolean(busy), onClick: () => void run("local_sunshine_restart", {}, "Sunshine recovery requested"), focusKey: "this-device.sunshine.recover"}))
+        ),
+        pending.length ? React.createElement(PanelSection, {title: "Pairing requests"}, pending.map(item => React.createElement(PanelSectionRow, {key: item.pairing_id, focusKey: `incoming.${item.pairing_id}`}, React.createElement(Text, null, item.client_name || "Unknown client"), item.verification_code && React.createElement(Text, null, `Code: ${item.verification_code}`), React.createElement(Text, {muted: true}, "Confirm the same code on both devices."), React.createElement(Button, {label: "Reject", disabled: Boolean(busy), onClick: () => void run("reject_pairing", {pairing_id: item.pairing_id}, "Pairing rejected"), focusKey: `incoming.${item.pairing_id}.reject`, autoFocus: true}), React.createElement(Button, {label: "Approve", disabled: Boolean(busy), onClick: () => void run("approve_pairing", {pairing_id: item.pairing_id, scopes: item.requested_scopes}, "Pairing approved"), focusKey: `incoming.${item.pairing_id}.approve`})))) : null,
+        React.createElement(PanelSection, {title: "Paired clients"}, clients.length ? clients.map(item => React.createElement(PanelSectionRow, {key: item.client_id, focusKey: `client.${item.client_id}`}, React.createElement(Text, null, item.name || "Unnamed client"), React.createElement(Text, {muted: true}, clientType(item) + " · Paired"), React.createElement(Text, {muted: true}, clientPermissions(item) || "No permissions"), React.createElement(Button, {label: "Remove access", disabled: Boolean(busy), onClick: () => setModal({kind: "revoke", client: item}), focusKey: `client.${item.client_id}.remove`, danger: true}))) : React.createElement(PanelSectionRow, {focusKey: "this-device.no-clients"}, React.createElement(Text, null, "No paired clients."))),
         modal?.kind === "revoke" && React.createElement(ConfirmModal, {title: `Remove ${modal.client.name || "client"}'s access to this device?`, body: "This removes incoming access only; it does not remove this handheld's outgoing pairing.", confirmLabel: "Remove access", busy: Boolean(busy), danger: true, onCancel: () => setModal(null), onConfirm: async () => {const id = modal.client.client_id; setModal(null); await run("revoke_client", {client_id: id}, "Client access removed");}})
+      );
+    }
+
+    function localOutputName(output) {
+      return output?.display_name || output?.name || output?.description || "Unnamed screen";
+    }
+
+    function localOutputConnector(output) {
+      return output?.connector ? `Connector ${output.connector}` : "Connector unknown";
+    }
+
+    function localOutputDetails(output) {
+      const details = [output?.connector || "Connector unknown"];
+      if (output?.monitor_vendor) details.push(output.monitor_vendor);
+      if (Number.isInteger(output?.monitor_product_id)) details.push(`model ${output.monitor_product_id}`);
+      return details.join(" · ");
+    }
+
+    function renderLocalPreview(preview) {
+      const seconds = remaining(preview?.deadline);
+      const expired = seconds !== null && seconds <= 0;
+      const applying = preview?.deadline == null || ["accepted", "dispatched"].includes(preview?.state);
+      const readyToConfirm = preview?.state === "observed_return" && !expired && !preview?.restore_started;
+      const targetName = localOutputName((settings?.local_display?.outputs || []).find(item => item.output_key === preview?.target_output_key));
+      return React.createElement(PanelSection, {title: "Screen preview"},
+        React.createElement(PanelSectionRow, {focusKey: "local-preview.status"},
+          React.createElement(Text, null, applying ? `Applying ${targetName} as the Gaming Mode screen…` : `Can you see the picture on ${targetName}?`),
+          React.createElement(Text, {live: true}, applying ? "Waiting for active-screen readback…" : expired ? "Preview time ended · Checking restoration…" : `Reverts in ${seconds === null ? "unknown" : `${seconds} seconds`}`)),
+        React.createElement(PanelSectionRow, {focusKey: "local-preview.revert"}, React.createElement(Button, {label: "Revert to previous screen", disabled: Boolean(busy) || Boolean(preview?.restore_started), onClick: () => void run("local_display_revert", {preview_id: preview.preview_id}, "Checking baseline restoration…"), focusKey: "local-preview.revert"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-preview.keep"}, React.createElement(Button, {label: "Keep this screen", disabled: Boolean(busy) || !readyToConfirm, onClick: () => void run("local_display_confirm", {preview_id: preview.preview_id}, "Gaming Mode screen confirmed"), focusKey: "local-preview.keep"}))
+      );
+    }
+
+    function renderLocalDisplayLegacy() {
+      const local = settings?.local_display || {};
+      const selection = local.selection || {};
+      const outputs = Array.isArray(local.outputs) ? local.outputs : [];
+      const activeKey = local.active_output_key || selection.active_output_key || null;
+      const activeState = local.active_state || selection.active_state || "unknown";
+      const selectedOutput = outputs.find(item => item.output_key === selectedLocalOutputKey) || outputs.find(item => item.output_key === activeKey) || outputs[0] || null;
+      const multiple = outputs.length > 1;
+      const inventoryUsable = local.available === true && local.fresh === true && local.previous_reading !== true;
+      const activeKnown = activeState === "known" && Boolean(activeKey);
+      const switchAvailable = inventoryUsable && selection.can_switch_live === true && selection.recovery_available === true && activeKnown;
+      const canSelect = switchAvailable && selectedOutput && selectedOutput.connected !== false && selectedOutput.can_switch_live === true && selectedOutput.output_key !== activeKey && Number.isInteger(local.generation) && !local.preview;
+      const monitorSwitch = local.monitor_switch || {};
+      const monitorSwitchAvailable = monitorSwitch.available === true && local.previous_reading !== true;
+      const monitorSwitchClearAvailable = monitorSwitchAvailable || Boolean(monitorSwitch.configured_connector);
+      const monitorTargets = outputs.filter(output => output.connected === true && output.connector);
+      const activeGamescopeOutput = outputs.find(output => output.connector === monitorSwitch.active_connector);
+      const configuredGamescopeOutput = outputs.find(output => output.connector === monitorSwitch.configured_connector);
+      const preview = local.preview;
+      const lastOperation = local.last_operation;
+      const connectedCount = Number.isInteger(local.connected_count) ? local.connected_count : outputs.filter(item => item.connected === true).length;
+      const inventorySource = local.source === "linux-drm-sysfs"
+        ? (monitorSwitch.readback_available ? "Read from Linux DRM connector status; Gamescope readback identifies the current scanout." : "Read from Linux DRM connector status; current Gamescope scanout readback is unavailable.")
+        : "Reported by the Steam display bridge.";
+      const selectionReason = selection.reason || local.reason || "Live Gaming Mode screen selection is unavailable.";
+      const stateDescription = activeState === "known"
+        ? "The active Gaming Mode screen is identified."
+        : activeState === "ambiguous"
+          ? "More than one active-screen signal was found; no screen is selected."
+          : "The active Gaming Mode screen is unknown; no screen is guessed from order or current mode.";
+      if (modal?.kind === "restart-gamescope") {
+        return React.createElement(PanelSection, {title: "Gaming Mode monitor switch"}, React.createElement(ConfirmModal, {
+          title: "Restart Gaming Mode now?",
+          body: "Running games and the Steam UI will close. The screen may be black for several seconds while Gaming Mode starts again on the saved output. Desktop Mode and the device itself will not restart.",
+          confirmLabel: "Restart Gaming Mode",
+          busy: Boolean(busy),
+          onCancel: () => setModal(null),
+          onConfirm: async () => {setModal(null); await run("local_gamescope_restart", {}, "Gaming Mode restart requested");},
+        }));
+      }
+      return React.createElement(PanelSection, {title: "Display settings"},
+        React.createElement(PanelSectionRow, {focusKey: "local-display.explanation"}, React.createElement(Text, null, "Choose which attached physical screen receives Gaming Mode on this device."), React.createElement(Text, {muted: true}, "This is separate from remote display resolution settings and does not change Desktop Mode.")),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.inventory"}, React.createElement(Text, null, `${connectedCount} connected ${connectedCount === 1 ? "screen" : "screens"} detected`), React.createElement(Text, {muted: true}, inventorySource)),
+        local.previous_reading && React.createElement(PanelSectionRow, {focusKey: "local-display.previous"}, React.createElement(Text, {live: true}, "Showing a previous display inventory."), React.createElement(Text, {muted: true}, "Refresh before selecting a screen.")),
+        !local.available && !local.previous_reading && React.createElement(PanelSectionRow, {focusKey: "local-display.unavailable"}, React.createElement(Text, {live: true}, local.reason || "Steam display inventory is unavailable.")),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.active"}, React.createElement(Text, null, `Active screen: ${activeState === "known" ? localOutputName(outputs.find(item => item.output_key === activeKey)) : activeState}`), React.createElement(Text, {muted: true}, stateDescription)),
+        preview && renderLocalPreview(preview),
+        outputs.length === 0 && React.createElement(PanelSectionRow, {focusKey: "local-display.empty"}, React.createElement(Text, null, "No attached screens are available from the Steam display bridge.")),
+        outputs.map(output => {
+          const isActive = activeState === "known" && output.output_key === activeKey;
+          const isSelected = selectedOutput?.output_key === output.output_key;
+          const title = `${localOutputName(output)}${isActive ? " — Active" : ""}`;
+          const description = output.connected === false ? `${localOutputConnector(output)} · Disconnected` : `${localOutputConnector(output)} · ${isActive ? "Active Gaming Mode screen" : isSelected ? "Selected" : "Available"}`;
+          return React.createElement(PanelSectionRow, {key: output.output_key, focusKey: `local-display.output.${output.output_key}`}, React.createElement(SelectableRow, {selected: isSelected, title, description, disabled: output.connected === false || !inventoryUsable, onClick: () => {if (output.connected !== false && inventoryUsable) setSelectedLocalOutputKey(output.output_key);}, focusKey: `local-display.output.${output.output_key}`}));
+        }),
+        !multiple && outputs.length === 1 && React.createElement(PanelSectionRow, {focusKey: "local-display.one-output"}, React.createElement(Text, {muted: true}, "Only one attached screen is advertised, so there is no alternate Gaming Mode screen to choose.")),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.capability"}, React.createElement(Text, {muted: true}, selectionReason)),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.persistence"}, React.createElement(Text, {muted: true}, "Live screen selection remains unverified. The Gamescope output override below controls the next Gaming Mode session and can be cleared.")),
+        React.createElement(PanelSection, {title: "Gaming Mode monitor switch"},
+          React.createElement(PanelSectionRow, {focusKey: "local-display.monitor-switch.explanation"}, React.createElement(Text, null, "Set the Gamescope output for the next Gaming Mode session"), React.createElement(Text, {muted: true}, "This configures Gamescope's --prefer-output using the DRM connector. It does not switch the current session; leave and re-enter Gaming Mode to apply it.")),
+          monitorSwitch.active_connector && React.createElement(PanelSectionRow, {focusKey: "local-display.monitor-switch.active"}, React.createElement(Text, null, `Current Gamescope scanout: ${activeGamescopeOutput ? localOutputName(activeGamescopeOutput) : monitorSwitch.active_connector}`)),
+          monitorSwitch.configured_connector && React.createElement(PanelSectionRow, {focusKey: "local-display.monitor-switch.configured"}, React.createElement(Text, null, `Next Gaming Mode output: ${configuredGamescopeOutput ? localOutputName(configuredGamescopeOutput) : monitorSwitch.configured_connector}`)),
+          !monitorSwitchAvailable && React.createElement(PanelSectionRow, {focusKey: "local-display.monitor-switch.unavailable"}, React.createElement(Text, {muted: true}, monitorSwitch.reason || "Gamescope output preference is unavailable.")),
+          monitorTargets.map(output => React.createElement(PanelSectionRow, {key: `local-display.monitor-switch.${output.output_key}`, focusKey: `local-display.monitor-switch.${output.output_key}`}, React.createElement(Button, {label: `Use ${localOutputName(output)} next session`, disabled: Boolean(busy) || !monitorSwitchAvailable, onClick: () => void run("local_gamescope_output", {output_key: output.output_key}, `Gamescope output saved: ${localOutputName(output)} · Re-enter Gaming Mode to apply`), focusKey: `local-display.monitor-switch.${output.output_key}.button` }))),
+          React.createElement(PanelSectionRow, {focusKey: "local-display.monitor-switch.clear"}, React.createElement(Button, {label: "Clear Gaming Mode output override", disabled: Boolean(busy) || !monitorSwitchClearAvailable, onClick: () => void run("local_clear_gamescope_output", {}, "Gamescope output override cleared · Re-enter Gaming Mode to restore defaults"), focusKey: "local-display.monitor-switch.clear.button"})),
+          React.createElement(PanelSectionRow, {focusKey: "local-display.monitor-switch.restart"}, React.createElement(Button, {label: "Restart Gaming Mode now", disabled: Boolean(busy) || monitorSwitch.restart_available !== true, onClick: () => setModal({kind: "restart-gamescope"}), focusKey: "local-display.monitor-switch.restart.button"}), React.createElement(Text, {muted: true}, "Applies the saved output without entering Desktop Mode. Running games and the Steam UI will close."))
+        ),
+        selection.restart_required && React.createElement(PanelSectionRow, {focusKey: "local-display.restart-required"}, React.createElement(Text, {muted: true}, selection.can_set_startup_preference ? "The adapter reports a restart-required startup preference, but this plugin does not save startup screen preferences yet." : "A restart-required route is reported, but no startup preference is saved by this plugin.")),
+        lastOperation && lastOperation.state === "failed" && lastOperation.restore_state === "succeeded" && React.createElement(PanelSectionRow, {focusKey: "local-display.last-restored"}, React.createElement(Text, {live: true}, "The screen preview was reverted to the previous Gaming Mode screen.")),
+        lastOperation && lastOperation.state === "failed" && lastOperation.restore_state !== "succeeded" && React.createElement(PanelSectionRow, {focusKey: "local-display.last-failure"}, React.createElement(Text, {live: true}, `Last screen selection failed: ${lastOperation.reason || "unknown reason"}`)),
+        lastOperation && lastOperation.state === "unknown" && React.createElement(PanelSectionRow, {focusKey: "local-display.last-unknown"}, React.createElement(Text, {live: true}, `Last screen selection result is unknown: ${lastOperation.reason || "check the physical screen before retrying"}`)),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.preview-button"}, React.createElement(Button, {label: selectedOutput ? `Preview ${localOutputName(selectedOutput)}` : "Preview selected screen", disabled: !canSelect || Boolean(busy), onClick: () => void run("local_display_preview", {output_key: selectedOutput.output_key, generation: local.generation}, "Checking screen preview…"), focusKey: "local-display.preview-button"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.refresh"}, React.createElement(Button, {label: "Refresh inventory", disabled: Boolean(busy), onClick: () => void loadLocalDisplay(), focusKey: "local-display.refresh"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-display.back"}))
+      );
+    }
+
+    function renderLocalDisplay() {
+      const local = settings?.local_display || {};
+      const outputs = Array.isArray(local.outputs) ? local.outputs : [];
+      const monitorSwitch = local.monitor_switch || {};
+      const connected = outputs.filter(output => output.connected === true && output.output_key && output.connector);
+      const byKey = new Map(connected.map(output => [output.output_key, output]));
+      const orderedTargets = localOutputOrder.map(key => byKey.get(key)).filter(Boolean);
+      for (const output of connected) {
+        if (!orderedTargets.some(item => item.output_key === output.output_key)) orderedTargets.push(output);
+      }
+      const orderedKeys = orderedTargets.map(output => output.output_key);
+      const orderedConnectors = orderedTargets.map(output => output.connector);
+      const configuredConnectors = Array.isArray(monitorSwitch.configured_connectors) ? monitorSwitch.configured_connectors : [];
+      const orderDirty = orderedConnectors.join("|") !== configuredConnectors.join("|");
+      const activeOutput = outputs.find(output => output.connector === monitorSwitch.active_connector);
+      const inventoryUsable = local.available === true && local.fresh === true && local.previous_reading !== true;
+      const canSave = inventoryUsable && monitorSwitch.available === true && orderedKeys.length > 0 && !busy;
+      const lastOperation = local.last_operation;
+
+      const moveOutput = (index, delta) => {
+        const target = index + delta;
+        if (target < 0 || target >= orderedKeys.length) return;
+        const next = [...orderedKeys];
+        const moved = next[index];
+        next[index] = next[target];
+        next[target] = moved;
+        localOutputOrderTouchedRef.current = true;
+        setLocalOutputOrder(next);
+      };
+
+      const saveOrder = async restart => {
+        const value = await run(
+          "local_gamescope_outputs",
+          {output_keys: orderedKeys, generation: local.generation, restart},
+          restart ? "Output order saved; restarting Gaming Mode" : "Output order saved"
+        );
+        if (value) localOutputOrderTouchedRef.current = false;
+        return value;
+      };
+
+      if (modal?.kind === "save-restart-gamescope") {
+        return React.createElement(PanelSection, {title: "Display order"}, React.createElement(ConfirmModal, {
+          title: "Save and restart Gaming Mode?",
+          body: "Running games and Steam UI will close. Gaming Mode will restart using this display order.",
+          confirmLabel: "Save and restart",
+          busy: Boolean(busy),
+          onCancel: () => setModal(null),
+          onConfirm: async () => {setModal(null); await saveOrder(true);},
+        }));
+      }
+
+      return React.createElement(PanelSection, {title: "Display order"},
+        React.createElement(PanelSectionRow, {focusKey: "local-display.summary"},
+          React.createElement(Text, null, connected.length + " connected " + (connected.length === 1 ? "screen" : "screens")),
+          React.createElement(Text, {muted: true}, "Gaming Mode uses the first available screen in this order.")),
+        monitorSwitch.active_connector && React.createElement(PanelSectionRow, {focusKey: "local-display.active"},
+          React.createElement(Text, null, "Active: " + (activeOutput ? localOutputName(activeOutput) : monitorSwitch.active_connector))),
+        local.previous_reading && React.createElement(PanelSectionRow, {focusKey: "local-display.previous"}, React.createElement(Text, {live: true}, "Refresh before saving.")),
+        !local.available && !local.previous_reading && React.createElement(PanelSectionRow, {focusKey: "local-display.unavailable"}, React.createElement(Text, {live: true}, local.reason || "Display list unavailable.")),
+        orderedTargets.map((output, index) => {
+          const active = output.connector === monitorSwitch.active_connector;
+          return React.createElement(PanelSectionRow, {key: output.output_key, focusKey: "local-display.order." + output.output_key},
+            React.createElement(Text, null, (index + 1) + ". " + localOutputName(output) + (active ? " — Active" : "")),
+            React.createElement(Text, {muted: true}, localOutputDetails(output)),
+            React.createElement(Button, {label: "Move up", disabled: Boolean(busy) || index === 0, onClick: () => moveOutput(index, -1), focusKey: "local-display.order." + output.output_key + ".up"}),
+            React.createElement(Button, {label: "Move down", disabled: Boolean(busy) || index === orderedTargets.length - 1, onClick: () => moveOutput(index, 1), focusKey: "local-display.order." + output.output_key + ".down"}));
+        }),
+        orderDirty && React.createElement(PanelSectionRow, {focusKey: "local-display.unsaved"}, React.createElement(Text, {live: true}, "Display order has unsaved changes.")),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.save"}, React.createElement(Button, {
+          label: "Save for next session",
+          disabled: !canSave,
+          onClick: () => void saveOrder(false),
+          focusKey: "local-display.save.button",
+        })),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.save-restart"}, React.createElement(Button, {
+          label: "Save and restart Gaming Mode",
+          disabled: !canSave || monitorSwitch.restart_available !== true,
+          onClick: () => setModal({kind: "save-restart-gamescope"}),
+          focusKey: "local-display.save-restart.button",
+        })),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.automatic"}, React.createElement(Button, {
+          label: "Use automatic display order",
+          disabled: Boolean(busy) || (!monitorSwitch.available && !configuredConnectors.length),
+          onClick: async () => {
+            const value = await run("local_clear_gamescope_output", {}, "Automatic display order restored");
+            if (value) {
+              localOutputOrderTouchedRef.current = false;
+              setLocalOutputOrder(connected.map(output => output.output_key));
+            }
+          },
+          focusKey: "local-display.automatic.button",
+        })),
+        lastOperation && lastOperation.state === "failed" && React.createElement(PanelSectionRow, {focusKey: "local-display.failure"}, React.createElement(Text, {live: true}, "Last change failed: " + (lastOperation.reason || "unknown reason"))),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.refresh"}, React.createElement(Button, {label: "Refresh", disabled: Boolean(busy), onClick: () => {localOutputOrderTouchedRef.current = false; void loadLocalDisplay();}, focusKey: "local-display.refresh"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-display.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-display.back"}))
       );
     }
 
@@ -1960,7 +2322,9 @@
         React.createElement(PanelSection, {title: "Server"},
           React.createElement(PanelSectionRow, {focusKey: "settings.listen"}, React.createElement(Text, null, server.listener?.running ? "Accepting connections" : "Server paused"), React.createElement(Button, {label: server.listener?.running ? "Pause accepting connections" : "Accept connections", disabled: Boolean(busy) || !roleHasServer(mode), onClick: () => void run("update_settings", {changes: {listen_enabled: !server.listener?.running}}), focusKey: "settings.listen"})),
           React.createElement(PanelSectionRow, {focusKey: "settings.address"}, React.createElement(Text, {muted: true}, `Address: ${server.listener?.address || "all interfaces"}:${server.listener?.port || 18443}`)),
-          React.createElement(PanelSectionRow, {focusKey: "settings.sunshine"}, React.createElement(Text, null, "Sunshine monitoring"), React.createElement("label", null, React.createElement("input", {type: "checkbox", checked: server.settings?.monitor_sunshine === true, disabled: !roleHasServer(mode), onChange: event => void run("update_settings", {changes: {monitor_sunshine: event.target.checked}})}), " Monitor Sunshine"))
+          React.createElement(PanelSectionRow, {focusKey: "settings.sunshine"}, React.createElement(Text, null, "Sunshine monitoring"), React.createElement("label", null, React.createElement("input", {type: "checkbox", checked: server.settings?.monitor_sunshine === true, disabled: !roleHasServer(mode), onChange: event => void run("update_settings", {changes: {monitor_sunshine: event.target.checked}})}), " Monitor Sunshine")),
+          React.createElement(PanelSectionRow, {focusKey: "settings.sunshine-auto"}, React.createElement(Text, null, "Sunshine recovery"), React.createElement("label", null, React.createElement("input", {type: "checkbox", checked: server.settings?.auto_recover_sunshine !== false, disabled: !roleHasServer(mode) || server.settings?.monitor_sunshine !== true, onChange: event => void run("update_settings", {changes: {auto_recover_sunshine: event.target.checked}})}), " Auto-recover after a confirmed crash")),
+          !roleHasServer(mode) && React.createElement(PanelSectionRow, {focusKey: "settings.local-display-role"}, React.createElement(Text, {muted: true}, "Local Gaming Mode screen controls require Server or Both mode. Client mode controls a remote device only."))
         ),
         React.createElement(PanelSectionRow, {focusKey: "settings.back"}, React.createElement(Button, {label: "Back", onClick: () => {
           if (modeDirty) setModal({kind: "discard-mode"});
@@ -1983,6 +2347,7 @@
       if (view === "pairing") return renderPairing();
       if (view === "replace") return renderReplace();
       if (view === "this-device") return renderThisDevice();
+      if (view === "local-display") return renderLocalDisplay();
       if (view === "settings") return renderSettings();
       if (view === "power") return renderPower();
       if (view === "display") return renderDisplay();

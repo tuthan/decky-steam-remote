@@ -42,6 +42,14 @@ function displayState(currentModeId) {
   return concat(bytesField(1, display), field(2, 1), field(3, 1));
 }
 
+function monitorInfo(selectedDeviceName) {
+  const monitors = [
+    concat(bytesField(1, "DP-1"), bytesField(2, "Desk monitor")),
+    concat(bytesField(1, "HDMI-A-1"), bytesField(2, "Living room TV")),
+  ];
+  return concat(bytesField(1, selectedDeviceName), ...monitors.map(value => bytesField(2, value)));
+}
+
 function decodeVarints(value) {
   const bytes = Buffer.from(value, "base64");
   const fields = {};
@@ -77,6 +85,8 @@ function readVarint(bytes, start) {
   let shutdownCalls = 0;
   let sunshineStatusCalls = 0;
   let sunshineRestartCalls = 0;
+  let preferredMonitorCalls = 0;
+  let preferredMonitor = "";
   let loaderConnectCalls = 0;
   let legacyPluginCalls = 0;
   const updateFetches = [];
@@ -98,22 +108,32 @@ function readVarint(bytes, start) {
     RestartPC() { restartCalls++; return Promise.resolve("restart-requested"); },
     ShutdownPC() { shutdownCalls++; return Promise.resolve("shutdown-requested"); },
   };
+  const settings = {
+    SetPreferredMonitor(value) { preferredMonitorCalls++; preferredMonitor = value; return Promise.resolve("preferred-monitor-requested"); },
+    GetMonitorInfo() { return Promise.resolve(new Uint8Array(monitorInfo(preferredMonitor))); },
+  };
   const React = {
     useState(initial) { return [initial, () => {}]; },
     useEffect(effect) { effect(); },
     createElement(type, props, ...children) { return {type, props: props || {}, children}; },
   };
   const source = fs.readFileSync(path.join(__dirname, "index.js"), "utf8");
+  assert.match(source, /local_gamescope_outputs:\s*\["output_keys", "generation", "restart"\]/, "ordered monitor saves must use a fixed backend contract");
+  assert.match(source, /Save for next session/, "the display-order UI must offer a non-disruptive save");
+  assert.match(source, /Save and restart Gaming Mode/, "the display-order UI must offer a confirmed apply path");
+  assert.match(source, /Move up/, "the display order must be controller-reorderable");
   const realSetTimeout = setTimeout;
   const fastSetTimeout = (callback, milliseconds, ...args) => realSetTimeout(callback, Math.min(milliseconds, 8), ...args);
   const factory = vm.runInNewContext(source, {
     window: {
-      SteamClient: {System: system},
+      SteamClient: {System: system, Settings: settings},
       DeckyBackend: {
         call(route, pluginName, methodName) {
           assert.equal(route, "loader/call_legacy_plugin_method");
           assert.equal(pluginName, "Decky Sunshine");
-          if (methodName === "isSunshineRunning") { sunshineStatusCalls++; return Promise.resolve({success: true, result: false}); }
+          // Decky Sunshine v2025.10.27 returns an empty string when its
+          // `result and any(...)` process probe sees no running Flatpak.
+          if (methodName === "isSunshineRunning") { sunshineStatusCalls++; return Promise.resolve({success: true, result: ""}); }
           if (methodName === "startSunshine") { sunshineRestartCalls++; return Promise.resolve({success: true, result: true}); }
           throw new Error(`unexpected Sunshine method ${methodName}`);
         },
@@ -181,6 +201,7 @@ function readVarint(bytes, start) {
     {command_id: "bridge-power", operation_id: "op-power", kind: "power", payload: {action: "suspend"}},
     {command_id: "bridge-restart", operation_id: "op-restart", kind: "power", payload: {action: "restart"}},
     {command_id: "bridge-shutdown", operation_id: "op-shutdown", kind: "power", payload: {action: "shutdown"}},
+    {command_id: "bridge-preferred-monitor", operation_id: "op-preferred-monitor", kind: "set_preferred_monitor", payload: {monitor_device_name: "DP-1"}},
     {command_id: "bridge-sunshine-status", operation_id: "op-sunshine-status", kind: "sunshine_status", payload: {}},
     {command_id: "bridge-sunshine-restart", operation_id: "op-sunshine-restart", kind: "sunshine_restart", payload: {}},
   ];
@@ -245,18 +266,25 @@ function readVarint(bytes, start) {
   assert.equal(suspendCalls, 1, "the bridge must invoke suspend only for a fixed power command");
   assert.equal(restartCalls, 1, "the bridge must invoke restart only for a fixed power command");
   assert.equal(shutdownCalls, 1, "the bridge must invoke shutdown only for a fixed power command");
-  assert.deepEqual(results.map(item => item.command_id), ["bridge-mode", "bridge-power", "bridge-restart", "bridge-shutdown", "bridge-sunshine-status", "bridge-sunshine-restart"]);
+  assert.deepEqual(results.map(item => item.command_id), ["bridge-mode", "bridge-power", "bridge-restart", "bridge-shutdown", "bridge-preferred-monitor", "bridge-sunshine-status", "bridge-sunshine-restart"]);
   assert.equal(results[0].result.ok, true);
   assert.equal(results[0].result.snapshot.outputs[0].current_mode_id, "2");
   assert.equal(results[0].result.snapshot.outputs[0].generation, 1, "a mode switch must not invalidate the output generation");
+  assert.equal(results[0].result.snapshot.methods.display_selection, false, "unverified Steam output selection must stay disabled");
+  assert.equal(results[0].result.snapshot.methods.preferred_monitor, true, "Steam preferred-monitor test capability should be advertised when the fixed method exists");
+  assert.equal(results[0].result.snapshot.outputs[0].identity_confidence, "unknown", "legacy display IDs are not enough for local selection");
   assert.equal(results[1].result.ok, true);
   assert.equal(results[2].result.action, "restart");
   assert.equal(results[3].result.action, "shutdown");
-  assert.equal(results[4].result.running, false);
-  assert.equal(results[5].result.ok, true);
+  assert.equal(results[4].result.ok, true);
+  assert.equal(results[4].result.monitor_device_name, "DP-1");
+  assert.equal(results[4].result.readback.selected_device_name, "DP-1");
+  assert.equal(results[5].result.running, false);
+  assert.equal(results[6].result.ok, true);
   assert.equal(loaderConnectCalls, 0, "the legacy owner route must be preferred for Decky Sunshine");
   assert.equal(legacyPluginCalls, 0, "API-v1 backend calls should use the positional loader API");
   assert.ok(sunshineStatusCalls >= 2, "the bridge must probe and monitor through Decky Sunshine");
   assert.equal(sunshineRestartCalls, 1, "the bridge must invoke the owner restart method only for a fixed command");
-  console.log("PASS: production Decky bridge uses API v1, validates OTA metadata, decodes state, preserves display generations, invokes power actions, and delegates Sunshine to its owner");
+  assert.equal(preferredMonitorCalls, 1, "the bridge must invoke the fixed preferred-monitor method only for a fixed command");
+  console.log("PASS: production Decky bridge uses API v1, validates OTA metadata, decodes state, preserves display generations, invokes power actions, tests preferred-monitor selection, and delegates Sunshine to its owner");
 })().catch(error => { console.error(error); process.exitCode = 1; });

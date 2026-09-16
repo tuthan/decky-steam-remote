@@ -17,6 +17,8 @@ FILES = (
     "backend/__init__.py",
     "backend/bridge.py",
     "backend/display.py",
+    "backend/drm.py",
+    "backend/gamescope.py",
     "backend/identity.py",
     "backend/operations.py",
     "backend/pairing.py",

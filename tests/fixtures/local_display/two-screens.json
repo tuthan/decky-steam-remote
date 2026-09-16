@@ -1,0 +1,58 @@
+{
+  "ready": true,
+  "generation": 7,
+  "methods": {"display": true, "display_selection": true},
+  "active_output_key": "output:hdmi-a-1",
+  "selection": {
+    "can_switch_live": true,
+    "can_set_startup_preference": false,
+    "restart_required": false,
+    "recovery_available": true,
+    "reason": "",
+    "adapter": "verified-test-adapter"
+  },
+  "outputs": [
+    {
+      "id": "steam-hdmi",
+      "output_key": "output:hdmi-a-1",
+      "name": "HDMI-A-1",
+      "display_name": "Living Room TV",
+      "description": "Reference display",
+      "is_internal": false,
+      "connector": "HDMI-A-1",
+      "gpu_id": "gpu-0",
+      "connected": true,
+      "active": true,
+      "identity_confidence": "high",
+      "can_switch_live": true,
+      "can_set_startup_preference": false,
+      "restart_required": false,
+      "recovery_available": true,
+      "current_mode_id": "mode-1080-60",
+      "modes": [{"id": "mode-1080-60", "width": 1920, "height": 1080, "refresh_hz": 60}],
+      "generation": 7,
+      "rgb_range": 0
+    },
+    {
+      "id": "steam-dp",
+      "output_key": "output:dp-1",
+      "name": "DP-1",
+      "display_name": "Desk Monitor",
+      "description": "Secondary display",
+      "is_internal": false,
+      "connector": "DP-1",
+      "gpu_id": "gpu-0",
+      "connected": true,
+      "active": false,
+      "identity_confidence": "high",
+      "can_switch_live": true,
+      "can_set_startup_preference": false,
+      "restart_required": false,
+      "recovery_available": true,
+      "current_mode_id": "mode-1440-60",
+      "modes": [{"id": "mode-1440-60", "width": 2560, "height": 1440, "refresh_hz": 60}],
+      "generation": 7,
+      "rgb_range": 0
+    }
+  ]
+}

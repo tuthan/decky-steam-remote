@@ -25,9 +25,14 @@ from .display import (
     display_identity,
     mode_profile,
     resolve_restore_mode,
+    resolve_active_output,
     same_display_identity,
     same_mode_profile,
+    same_selection_identity,
+    selection_identity,
 )
+from .drm import DrmInventory
+from .gamescope import GamescopeError, GamescopeOutputManager
 from .identity import ensure_tls_material, opaque_id, read_boot_id, read_cpu_temperature, system_uptime_seconds
 from .operations import ACTIVE_STATES, OperationJournal, iso_timestamp
 from .pairing import derive_pairing_code, encode_payload
@@ -56,6 +61,7 @@ DEFAULT_SETTINGS = {
     "advertised_host": "",
     "device_name": "SteamOS device",
     "monitor_sunshine": False,
+    "auto_recover_sunshine": True,
 }
 
 _INTERFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
@@ -63,6 +69,9 @@ _CHANNEL_BINDING_RE = re.compile(r"^[A-Za-z0-9_-]{16,510}={0,2}$")
 MAX_PAIRING_RECORDS = 256
 PAIRING_RETENTION_SECONDS = 3600.0
 MAX_CLIENTS = 4
+LOCAL_OPERATION_OWNER = "decky-local"
+LOCAL_DISPLAY_PREVIEW_SECONDS = 20.0
+BRIDGE_SNAPSHOT_MAX_AGE = 8.0
 
 
 class ApiError(ProtocolError):
@@ -274,10 +283,13 @@ class HostService:
         provider: Any = None,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        drm_root: str | os.PathLike[str] = "/sys/class/drm",
+        gamescope: GamescopeOutputManager | None = None,
     ):
         self.clock = clock
         self.monotonic = monotonic
         self.store = StateStore(state_root, self._initial_state)
+        self._migrate_display_state()
         stored_host_id = self.store.get("host_id")
         if not isinstance(stored_host_id, str) or not stored_host_id:
             stored_host_id = opaque_id("host-")
@@ -285,11 +297,15 @@ class HostService:
         self.host_id = stored_host_id
         self.boot_id = read_boot_id()
         self.bridge = bridge or BridgeBroker(monotonic)
+        self._drm_inventory = DrmInventory(drm_root)
         self.journal = OperationJournal(self.store, clock)
+        self._mutation_lock = threading.RLock()
+        self._sunshine_recovery_armed = False
         self.monitor = SunshineMonitor(monotonic, clock)
         self.monitor.set_observer(DeckySunshineProcessObserver())
+        self.gamescope = gamescope or GamescopeOutputManager(self.store.root)
+        self.monitor.set_state_callback(self._on_sunshine_state_change)
         self._sunshine_owner_reason: str | None = None
-        self._mutation_lock = threading.RLock()
         self._pairing_lock = threading.RLock()
         self._rate_lock = threading.RLock()
         self._rate_buckets: dict[str, tuple[float, int]] = {}
@@ -310,7 +326,7 @@ class HostService:
 
     def _initial_state(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "host_id": opaque_id("host-"),
             "settings": dict(DEFAULT_SETTINGS),
             "clients": {},
@@ -318,8 +334,21 @@ class HostService:
             "operations": {},
             "profiles": {},
             "preview": None,
+            "local_display_preview": None,
             "tls": {},
         }
+
+    def _migrate_display_state(self) -> None:
+        """Add the local display transaction slot without replacing old state."""
+        state = self.store.snapshot()
+        version = state.get("schema_version", 1)
+        if not isinstance(version, int) or version > 2:
+            return
+        if version < 2 or "local_display_preview" not in state:
+            def migrate(value: dict[str, Any]) -> None:
+                value.setdefault("local_display_preview", None)
+                value["schema_version"] = 2
+            self.store.mutate(migrate)
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -352,6 +381,7 @@ class HostService:
         if self.store.get("settings", {}).get("monitor_sunshine") is True:
             self.monitor.set_enabled(True)
         self._start_preview_watchdog()
+        self._reconcile_local_display_preview()
         if start_server and self.store.get("settings", {}).get("listen_enabled", True):
             self._start_server()
         return self.get_local_status()
@@ -498,6 +528,7 @@ class HostService:
                 and _pairing_expiry(value) > self.clock()
             ],
             "bridge": self._bridge_public(),
+            "local_display": self.local_display_outputs(),
             "sunshine": self.monitor.public(),
         }
 
@@ -534,12 +565,24 @@ class HostService:
             if not isinstance(changes["monitor_sunshine"], bool):
                 raise ApiError("monitor_sunshine must be boolean")
             validated["monitor_sunshine"] = changes["monitor_sunshine"]
+        if "auto_recover_sunshine" in changes:
+            if not isinstance(changes["auto_recover_sunshine"], bool):
+                raise ApiError("auto_recover_sunshine must be boolean")
+            validated["auto_recover_sunshine"] = changes["auto_recover_sunshine"]
         self.store.mutate(lambda state: state.setdefault("settings", DEFAULT_SETTINGS).update(validated))
         settings = self.store.get("settings", DEFAULT_SETTINGS)
         if "monitor_sunshine" in validated:
             self.monitor.set_enabled(bool(settings.get("monitor_sunshine")))
             if not settings.get("monitor_sunshine"):
+                with self._mutation_lock:
+                    self._sunshine_recovery_armed = False
                 self.journal.cancel_kind("sunshine.", "cancelled because Monitor Sunshine was disabled")
+        if "auto_recover_sunshine" in validated:
+            with self._mutation_lock:
+                if not settings.get("auto_recover_sunshine", DEFAULT_SETTINGS["auto_recover_sunshine"]):
+                    self._sunshine_recovery_armed = False
+                elif settings.get("monitor_sunshine") and self.monitor.public().get("state") == "running":
+                    self._sunshine_recovery_armed = True
         if any(key in validated for key in ("listen_enabled", "listen_address", "listen_port")):
             self._restart_server()
         return self.get_local_status()
@@ -728,6 +771,44 @@ class HostService:
             self._sunshine_owner_reason = None
         self.monitor.set_provider(provider)
         return self.provider_compatibility()
+
+    def _on_sunshine_state_change(self, state: str, _previous_state: str | None) -> None:
+        """Recover once when an observed Sunshine process goes down.
+
+        The monitor deliberately reports state changes instead of owning
+        process control. A running observation arms one recovery request; the
+        first confirmed stopped observation consumes that arm. This gives a
+        failed owner plugin a bounded, one-request-per-outage path and leaves
+        the existing manual action available for another attempt.
+        """
+        with self._mutation_lock:
+            settings = self.store.get("settings", {})
+            monitoring = settings.get("monitor_sunshine") is True
+            automatic = settings.get(
+                "auto_recover_sunshine", DEFAULT_SETTINGS["auto_recover_sunshine"]
+            ) is True
+            if state == "running":
+                self._sunshine_recovery_armed = monitoring and automatic
+                return
+            if state != "stopped" or not monitoring or not automatic:
+                return
+            if _previous_state != "running":
+                # Do not turn an unavailable/unknown-to-stopped transition
+                # into a recovery request. Automatic recovery is specifically
+                # for a confirmed running-to-stopped outage.
+                return
+            if not self._sunshine_recovery_armed or not self.monitor.provider_ready():
+                return
+            if self.monitor.public().get("operation_id"):
+                return
+            self._sunshine_recovery_armed = False
+        try:
+            self._start_sunshine_restart("auto_monitor")
+        except ApiError:
+            # The provider may have disappeared or another mutation may have
+            # won the lane between the status read and this callback. Do not
+            # retry from the same stopped sample.
+            return
 
     def report_sunshine_owner(self, report: Any) -> dict[str, Any]:
         """Register the guarded frontend connection to Decky Sunshine.
@@ -1149,10 +1230,713 @@ class HostService:
             "age_ms": age_ms,
             "reason": None if snapshot.get("methods", {}).get("display") else "Steam display bridge is unavailable",
             "generation": max((output.get("generation", 0) for output in snapshot.get("outputs", [])), default=0),
-            "outputs": snapshot.get("outputs", []),
+            # Keep local Gaming Mode identity/capability metadata out of the
+            # existing authenticated wire contract. The local Decky RPC below
+            # is the only consumer of those additive bridge fields.
+            "outputs": [self._public_remote_output(output) for output in snapshot.get("outputs", [])],
             "profiles": public_profiles,
             "preview": self._public_preview(self.store.get("preview")),
         }
+
+    # ---- local Gaming Mode display selection -------------------------
+
+    @staticmethod
+    def _bridge_has_verified_local_adapter(snapshot: dict[str, Any]) -> bool:
+        methods = snapshot.get("methods", {})
+        return isinstance(methods, dict) and methods.get("display_selection") is True
+
+    def _local_inventory_snapshot(self) -> tuple[dict[str, Any] | None, int | None, bool]:
+        """Return a fresh physical inventory or a separately-labelled old one.
+
+        Steam's legacy DisplayManager state can contain only the logical
+        Gamescope surface. Linux DRM sysfs remains a read-only source of the
+        physical connector inventory in that case. A verified local adapter,
+        when one exists, remains authoritative for selection-capable state.
+        """
+        current, age_ms = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+        physical = self._drm_inventory.snapshot()
+        if physical is not None and (current is None or not self._bridge_has_verified_local_adapter(current)):
+            return physical, 0, False
+        if current is not None and current.get("ready") is True:
+            return current, age_ms, False
+        previous, previous_age = self.bridge.previous_ready_snapshot()
+        if previous is not None:
+            return previous, previous_age, True
+        return None, age_ms if age_ms is not None else previous_age, False
+
+    @staticmethod
+    def _local_output_key(value: Any) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}", value):
+            raise ApiError("display output key is invalid", 400, "invalid_display_target")
+        return value
+
+    @staticmethod
+    def _local_generation(value: Any) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 2_147_483_647:
+            raise ApiError("display generation is invalid", 400, "invalid_display_generation")
+        return value
+
+    @staticmethod
+    def _local_current_mode(output: dict[str, Any] | None) -> dict[str, Any] | None:
+        return HostService._find_mode(output, output.get("current_mode_id")) if output else None
+
+    @staticmethod
+    def _local_find_output(snapshot: dict[str, Any] | None, output_key: Any) -> dict[str, Any] | None:
+        if not snapshot:
+            return None
+        return next((output for output in snapshot.get("outputs", []) if output.get("output_key") == output_key), None)
+
+    @staticmethod
+    def _local_selection_capability(snapshot: dict[str, Any]) -> dict[str, Any]:
+        selection = snapshot.get("selection", {}) if isinstance(snapshot.get("selection"), dict) else {}
+        active_key, active_state = resolve_active_output(snapshot.get("outputs", []), snapshot.get("active_output_key"))
+        can_switch = snapshot.get("ready") is True and snapshot.get("methods", {}).get("display_selection") is True and selection.get("can_switch_live") is True
+        can_startup = selection.get("can_set_startup_preference") is True
+        restart_required = selection.get("restart_required") is True
+        recovery_available = can_switch and active_state == "known"
+        reason = selection.get("reason") or ""
+        if snapshot.get("ready") is not True:
+            reason = snapshot.get("reason") or "Steam display bridge is unavailable"
+            can_switch = False
+            can_startup = False
+            restart_required = False
+            recovery_available = False
+        elif active_state == "ambiguous":
+            reason = "The active Gaming Mode screen is ambiguous; selection is disabled until it is identified."
+            recovery_available = False
+        elif active_state != "known" and can_switch:
+            reason = "The active Gaming Mode screen could not be identified reliably."
+            recovery_available = False
+        elif not can_switch and not reason:
+            reason = "Live Gaming Mode screen selection is not verified on this SteamOS build."
+        return {
+            "active_output_key": active_key,
+            "active_state": active_state,
+            "can_switch_live": can_switch,
+            "can_set_startup_preference": can_startup,
+            "restart_required": restart_required,
+            "recovery_available": recovery_available,
+            "reason": reason[:256],
+            "adapter": selection.get("adapter"),
+        }
+
+    def _local_gamescope_output_capability(self, *, previous_reading: bool = False) -> dict[str, Any]:
+        """Report the real Gamescope output-preference capability.
+
+        Steam's ``Settings.SetPreferredMonitor`` only changes a Steam
+        preference and does not move the active Gaming Mode scanout. SteamOS
+        starts Gamescope with ``--prefer-output`` instead, so this local
+        control manages a guarded user-session override and reads the active
+        connector from gamescopectl when available.
+        """
+        status = self.gamescope.status()
+        if previous_reading:
+            reason = "Previous display reading; refresh before applying the Gamescope output preference."
+        elif status["available"]:
+            reason = "Gamescope output preference is available; leave and re-enter Gaming Mode to apply it."
+        else:
+            reason = status.get("reason") or "Gamescope output preference is unavailable on this SteamOS build."
+        return {
+            "available": bool(status["available"] and not previous_reading),
+            "readback_available": status.get("readback_available") is True,
+            "active_connector": status.get("active_connector"),
+            "configured_connector": status.get("configured_connector"),
+            "configured_connectors": status.get("configured_connectors", []),
+            "requires_restart": status.get("requires_restart") is True,
+            "restart_available": bool(status.get("restart_available") is True and not previous_reading),
+            "age_ms": None,
+            "adapter": status.get("adapter"),
+            "reason": str(reason)[:256],
+        }
+
+    @staticmethod
+    def _mark_gamescope_active(snapshot: dict[str, Any], connector: Any) -> dict[str, Any]:
+        """Add Gamescope's connector readback to a physical DRM snapshot."""
+        if not isinstance(connector, str):
+            return snapshot
+        matches = [
+            output for output in snapshot.get("outputs", [])
+            if isinstance(output, dict) and output.get("connector") == connector
+        ]
+        # A connector name without its GPU is not a sufficient identity when
+        # two cards expose the same name.
+        if len(matches) != 1:
+            return snapshot
+        active_key = matches[0].get("output_key")
+        if not isinstance(active_key, str):
+            return snapshot
+        return {
+            **snapshot,
+            "active_output_key": active_key,
+            "outputs": [
+                {**output, "active": output.get("output_key") == active_key}
+                for output in snapshot.get("outputs", [])
+            ],
+        }
+
+    def local_display_outputs(self) -> dict[str, Any]:
+        """Return bounded local display inventory and independent capabilities."""
+        snapshot, age_ms, previous_reading = self._local_inventory_snapshot()
+        pending = self.store.get("local_display_preview")
+        if snapshot is None:
+            return {
+                "protocol_version": 1,
+                "available": False,
+                "fresh": False,
+                "previous_reading": False,
+                "stale": age_ms is not None,
+                "age_ms": age_ms,
+                "generation": None,
+                "active_output_key": None,
+                "active_state": "unknown",
+                "reason": "Steam display bridge is unavailable",
+                "selection": {
+                    "active_output_key": None,
+                    "active_state": "unknown",
+                    "can_switch_live": False,
+                    "can_set_startup_preference": False,
+                    "restart_required": False,
+                    "recovery_available": False,
+                    "reason": "Steam display bridge is unavailable",
+                    "adapter": None,
+                },
+                "outputs": [],
+                "source": None,
+                "connected_count": 0,
+                "monitor_switch": self._local_gamescope_output_capability(previous_reading=previous_reading),
+                "last_operation": self._latest_local_display_operation(),
+                "preview": self._public_local_preview(pending),
+            }
+        monitor_switch = self._local_gamescope_output_capability(previous_reading=previous_reading)
+        if snapshot.get("source") == "linux-drm-sysfs":
+            snapshot = self._mark_gamescope_active(snapshot, monitor_switch.get("active_connector"))
+        selection = self._local_selection_capability(snapshot)
+        if previous_reading:
+            selection = {
+                **selection,
+                "can_switch_live": False,
+                "can_set_startup_preference": False,
+                "restart_required": False,
+                "recovery_available": False,
+                "reason": "Previous display reading; refresh before applying a change.",
+            }
+        return {
+            "protocol_version": 1,
+            "available": snapshot.get("ready") is True and not previous_reading,
+            "fresh": not previous_reading and snapshot.get("ready") is True,
+            "previous_reading": previous_reading,
+            "stale": previous_reading or age_ms is None or age_ms > int(BRIDGE_SNAPSHOT_MAX_AGE * 1000),
+            "age_ms": age_ms,
+            "generation": snapshot.get("generation"),
+            "active_output_key": selection["active_output_key"],
+            "active_state": selection["active_state"],
+            "reason": None if snapshot.get("ready") is True and not previous_reading else (snapshot.get("reason") or "Previous display reading; refresh before applying a change."),
+            "selection": selection,
+            "outputs": snapshot.get("outputs", []),
+            "source": snapshot.get("source", "steam-display-manager"),
+            "connected_count": sum(1 for output in snapshot.get("outputs", []) if output.get("connected") is True),
+            "monitor_switch": monitor_switch,
+            "last_operation": self._latest_local_display_operation(),
+            "preview": self._public_local_preview(pending),
+        }
+
+    def _queue_local_gamescope_output(
+        self,
+        connector: str,
+        *,
+        output_key: str | None = None,
+        generation: int | None = None,
+    ) -> dict[str, Any]:
+        with self._mutation_lock:
+            self._reject_if_conflicting("display_preference")
+            capability = self._local_gamescope_output_capability()
+            if not capability["available"] and connector:
+                raise ApiError(capability["reason"], 409, "gamescope_output_unsupported")
+            if output_key is not None:
+                inventory = self._drm_inventory.snapshot()
+                target = self._local_find_output(inventory, output_key) if inventory else None
+                if inventory is None or target is None:
+                    raise ApiError("the selected screen is no longer available", 409, "stale_display_target")
+                if target.get("connected") is not True:
+                    raise ApiError("the selected screen is no longer connected", 409, "stale_display_target")
+                if target.get("connector") != connector:
+                    raise ApiError("the selected monitor identity changed", 409, "stale_display_target")
+                same_connector = [
+                    output for output in inventory.get("outputs", [])
+                    if output.get("connected") is True and output.get("connector") == connector
+                ]
+                if len(same_connector) != 1:
+                    raise ApiError("the selected connector identity is ambiguous", 409, "ambiguous_display_identity")
+                generation = inventory.get("generation")
+            operation = self.journal.internal("display.preference", {
+                "output_key": output_key,
+                "connector": connector or None,
+                "generation": generation,
+            }, owner=LOCAL_OPERATION_OWNER)
+            self.journal.update(operation["id"], target={
+                "output_key": output_key,
+                "connector": connector or None,
+                "generation": generation,
+            })
+            try:
+                result = self.gamescope.apply(connector) if connector else self.gamescope.clear()
+            except GamescopeError as exc:
+                operation = self.journal.update(operation["id"], state="failed", reason=str(exc)[:256])
+                raise ApiError(str(exc), 409, "gamescope_output_update_failed") from exc
+            reason = (
+                "Gamescope output preference saved; leave and re-enter Gaming Mode to apply it."
+                if connector
+                else "Gamescope output preference cleared; leave and re-enter Gaming Mode to restore defaults."
+            )
+            operation = self.journal.update(
+                operation["id"],
+                state="succeeded",
+                outcome="gamescope_output_configured" if connector else "gamescope_output_cleared",
+                reason=reason,
+            )
+            return {"protocol_version": 1, "operation": operation, "gamescope": result}
+
+    def local_gamescope_output(self, output_key: str) -> dict[str, Any]:
+        """Save a validated connector as the next Gaming Mode output."""
+        output_key = self._local_output_key(output_key)
+        inventory = self._drm_inventory.snapshot()
+        target = self._local_find_output(inventory, output_key) if inventory else None
+        connector = target.get("connector") if target else None
+        if not isinstance(connector, str):
+            raise ApiError("the selected screen has no usable monitor identity", 409, "invalid_display_target")
+        return self._queue_local_gamescope_output(connector, output_key=output_key)
+
+    def local_gamescope_outputs(self, output_keys: Any, generation: Any, restart: Any = False) -> dict[str, Any]:
+        """Save an ordered list of attached outputs and optionally restart Gaming Mode."""
+        if not isinstance(output_keys, list) or not 1 <= len(output_keys) <= 16:
+            raise ApiError("output order must contain 1 to 16 screens", 400, "invalid_display_target")
+        if type(restart) is not bool:
+            raise ApiError("restart must be a boolean", 400, "invalid_request")
+        generation = self._local_generation(generation)
+        validated_keys = [self._local_output_key(value) for value in output_keys]
+        if len(set(validated_keys)) != len(validated_keys):
+            raise ApiError("output order contains duplicate screens", 400, "invalid_display_target")
+
+        with self._mutation_lock:
+            self._reject_if_conflicting("display_preference")
+            capability = self._local_gamescope_output_capability()
+            if not capability["available"]:
+                raise ApiError(capability["reason"], 409, "gamescope_output_unsupported")
+            inventory = self._drm_inventory.snapshot()
+            if inventory is None:
+                raise ApiError("the screen inventory is unavailable", 409, "stale_display_target")
+            if inventory.get("generation") != generation:
+                raise ApiError("display inventory changed; refresh the order", 409, "stale_display_inventory")
+            connected_outputs = [
+                output for output in inventory.get("outputs", [])
+                if isinstance(output, dict) and output.get("connected") is True
+            ]
+            connectors: list[str] = []
+            for output_key in validated_keys:
+                target = self._local_find_output(inventory, output_key)
+                if target is None or target.get("connected") is not True:
+                    raise ApiError("a selected screen is no longer connected", 409, "stale_display_target")
+                connector = target.get("connector")
+                if not isinstance(connector, str):
+                    raise ApiError("a selected screen has no usable connector", 409, "invalid_display_target")
+                if sum(1 for output in connected_outputs if output.get("connector") == connector) != 1:
+                    raise ApiError("a selected connector identity is ambiguous", 409, "ambiguous_display_identity")
+                connectors.append(connector)
+            if len(set(connectors)) != len(connectors):
+                raise ApiError("output order contains duplicate connectors", 409, "ambiguous_display_identity")
+
+            target = {
+                "output_keys": validated_keys,
+                "connectors": connectors,
+                "generation": generation,
+                "restart": restart,
+            }
+            operation = self.journal.internal("display.preference", target, owner=LOCAL_OPERATION_OWNER)
+            self.journal.update(operation["id"], target=target)
+            try:
+                result = self.gamescope.apply_order(connectors)
+            except GamescopeError as exc:
+                operation = self.journal.update(operation["id"], state="failed", reason=str(exc)[:256])
+                raise ApiError(str(exc), 409, "gamescope_output_update_failed") from exc
+            if restart:
+                try:
+                    restart_result = self.gamescope.restart_session()
+                except GamescopeError as exc:
+                    reason = f"Output order was saved, but Gaming Mode could not restart: {exc}"
+                    operation = self.journal.update(
+                        operation["id"],
+                        state="failed",
+                        outcome="gamescope_output_configured_restart_failed",
+                        reason=reason[:256],
+                    )
+                    raise ApiError(reason, 409, "gamescope_session_restart_failed") from exc
+                result = {**result, "restart": restart_result}
+            operation = self.journal.update(
+                operation["id"],
+                state="succeeded",
+                outcome="gamescope_output_configured_and_restart_requested" if restart else "gamescope_output_configured",
+                reason="Output order saved; Gaming Mode restart requested." if restart else "Output order saved for the next Gaming Mode session.",
+            )
+            return {"protocol_version": 1, "operation": operation, "gamescope": result}
+
+    def local_clear_gamescope_output(self) -> dict[str, Any]:
+        """Remove the plugin-owned Gamescope output override."""
+        return self._queue_local_gamescope_output("")
+
+    def local_gamescope_restart(self) -> dict[str, Any]:
+        """Restart only the current Gaming Mode session using a fixed target."""
+        with self._mutation_lock:
+            self._reject_if_conflicting("display_preference")
+            operation = self.journal.internal(
+                "display.session-restart",
+                {"target": "gamescope-session.target"},
+                owner=LOCAL_OPERATION_OWNER,
+            )
+            self.journal.update(operation["id"], target={"target": "gamescope-session.target"})
+            try:
+                result = self.gamescope.restart_session()
+            except GamescopeError as exc:
+                operation = self.journal.update(operation["id"], state="failed", reason=str(exc)[:256])
+                raise ApiError(str(exc), 409, "gamescope_session_restart_failed") from exc
+            operation = self.journal.update(
+                operation["id"],
+                state="succeeded",
+                outcome="gamescope_session_restart_requested",
+                reason="Gaming Mode restart requested; running games and the Steam UI will close.",
+            )
+            return {"protocol_version": 1, "operation": operation, "gamescope": result}
+
+    # Keep the v0.5.7 local RPC names as aliases so an older frontend can use
+    # the corrected Gamescope implementation after only the backend reloads.
+    local_preferred_monitor = local_gamescope_output
+    local_clear_preferred_monitor = local_clear_gamescope_output
+
+    def _local_mutation_inventory(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        snapshot, age_ms = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+        if snapshot is None and age_ms is not None:
+            raise ApiError("Steam display inventory is stale; refresh before applying a change", 409, "stale_display_inventory")
+        if snapshot is None or snapshot.get("ready") is not True:
+            raise ApiError("Steam display bridge is unavailable or stale", 503, "bridge_unavailable")
+        selection = self._local_selection_capability(snapshot)
+        if selection["active_state"] != "known":
+            code = "active_output_ambiguous" if selection["active_state"] == "ambiguous" else "active_output_unknown"
+            raise ApiError(selection["reason"] or "The active Gaming Mode screen cannot be identified reliably", 409, code)
+        if not selection["can_switch_live"]:
+            reason = selection["reason"] or "Live Gaming Mode screen selection is not verified on this SteamOS build."
+            raise ApiError(reason, 409, "display_selection_unsupported")
+        if not selection["recovery_available"]:
+            raise ApiError(selection["reason"] or "Baseline screen recovery is unavailable", 409, "recovery_unavailable")
+        return snapshot, selection
+
+    def local_display_preview(self, output_key: str, generation: int) -> dict[str, Any]:
+        """Start a host-owned live output preview, if the adapter is verified."""
+        output_key = self._local_output_key(output_key)
+        generation = self._local_generation(generation)
+        with self._mutation_lock:
+            existing = self.store.get("local_display_preview")
+            if isinstance(existing, dict) and existing.get("preview_id"):
+                if existing.get("target_output_key") == output_key and existing.get("generation") == generation and not existing.get("restore_started"):
+                    operation = self.journal.get(existing["operation_id"]) or {"id": existing["operation_id"], "state": "unknown"}
+                    return {"protocol_version": 1, "operation": operation, "preview": self._public_local_preview(existing)}
+                raise ApiError("a Gaming Mode screen preview is already active", 409, "mutation_conflict")
+            self._reject_if_conflicting("local_display_preview")
+            snapshot, selection = self._local_mutation_inventory()
+            if snapshot.get("generation") != generation:
+                raise ApiError("display inventory generation is stale", 409, "stale_display_inventory")
+            target = self._local_find_output(snapshot, output_key)
+            if not target or target.get("connected") is not True:
+                raise ApiError("the selected screen is no longer connected", 409, "stale_display_target")
+            if target.get("identity_confidence") == "ambiguous":
+                raise ApiError("the selected screen identity is ambiguous; choose it again", 409, "ambiguous_display_identity")
+            if not target.get("can_switch_live"):
+                raise ApiError("the selected screen is not offered by the verified adapter", 409, "display_selection_unsupported")
+            active_key = selection["active_output_key"]
+            baseline = self._local_find_output(snapshot, active_key)
+            if not baseline or baseline.get("connected") is not True:
+                raise ApiError("the active screen is no longer available for recovery", 409, "recovery_unavailable")
+            if active_key == output_key:
+                raise ApiError("the selected screen is already active", 409, "no_change")
+            baseline_mode = self._local_current_mode(baseline)
+            target_mode = self._local_current_mode(target)
+            if baseline_mode is None or target_mode is None:
+                raise ApiError("a readable mode is required for display recovery", 409, "recovery_unavailable")
+            operation = self.journal.internal("display.selection.preview", {
+                "target_output_key": output_key, "generation": generation,
+            }, owner=LOCAL_OPERATION_OWNER)
+            preview = {
+                "kind": "gaming_mode_output",
+                "preview_id": operation["id"],
+                "operation_id": operation["id"],
+                "owner_client_id": LOCAL_OPERATION_OWNER,
+                "target_output_key": output_key,
+                "target_identity": selection_identity(target),
+                "target_mode": target_mode,
+                "baseline_output_key": active_key,
+                "baseline_identity": selection_identity(baseline),
+                "baseline_mode": baseline_mode,
+                "generation": generation,
+                "deadline": None,
+                "restore_started": False,
+                "restore_state": None,
+                "created_at": _utc_now(),
+                "session_id": self.boot_id,
+            }
+            self.store.mutate(lambda state: state.__setitem__("local_display_preview", preview))
+            self.journal.update(operation["id"], preview_id=operation["id"], target={
+                "target_output_key": output_key, "baseline_output_key": active_key, "generation": generation,
+            })
+            operation = self.journal.get(operation["id"]) or operation
+            self._spawn(operation["id"], lambda: self._run_local_display_preview(operation["id"]))
+            return {"protocol_version": 1, "operation": operation, "preview": self._public_local_preview(self.store.get("local_display_preview"))}
+
+    def _run_local_display_preview(self, operation_id: str) -> None:
+        with self._mutation_lock:
+            preview = self.store.get("local_display_preview")
+            if not preview or preview.get("preview_id") != operation_id:
+                self.journal.update(operation_id, state="failed", reason="display selection intent disappeared before dispatch")
+                return
+            dispatched = False
+            try:
+                snapshot, selection = self._local_mutation_inventory()
+                if snapshot.get("generation") != preview.get("generation"):
+                    raise DisplayError("display topology changed; preview not sent")
+                target = self._local_find_output(snapshot, preview["target_output_key"])
+                baseline = self._local_find_output(snapshot, preview["baseline_output_key"])
+                if not target or not baseline or target.get("connected") is not True or baseline.get("connected") is not True:
+                    raise DisplayError("target or baseline screen disappeared; preview not sent")
+                if not same_selection_identity(preview["target_identity"], selection_identity(target)):
+                    raise DisplayError("target screen identity changed; preview not sent")
+                if not same_selection_identity(preview["baseline_identity"], selection_identity(baseline)):
+                    raise DisplayError("baseline screen identity changed; preview not sent")
+                current_target_mode = self._local_current_mode(target)
+                if not same_mode_profile(preview["target_mode"], current_target_mode):
+                    raise DisplayError("target screen mode changed; preview not sent")
+                deadline = self.clock() + LOCAL_DISPLAY_PREVIEW_SECONDS
+                self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({"deadline": deadline}))
+                self.journal.update(operation_id, state="dispatched", target={
+                    "target_output_key": target["output_key"], "baseline_output_key": baseline["output_key"],
+                    "generation": snapshot["generation"],
+                })
+                dispatched = True
+                result = self.bridge.request("select_output", {
+                    "output_key": target["output_key"], "generation": snapshot["generation"],
+                }, operation_id, timeout=8)
+                if not _result_ok(result):
+                    raise BridgeError(str(result.get("reason", "Steam rejected Gaming Mode screen selection")))
+                readback = result.get("snapshot") if isinstance(result.get("snapshot"), dict) else None
+                if readback:
+                    self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({
+                        "readback": readback, "readback_at": _utc_now(),
+                    }))
+                latest, _ = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+                if not self._local_readback_matches(preview, latest, target=True):
+                    raise BridgeError("active screen readback did not confirm the selected target")
+                self.journal.update(operation_id, state="observed_return", outcome="target_active_read_back", reason="Preview is waiting for visible-screen confirmation or host timeout")
+            except DisplayError as exc:
+                self.journal.update(operation_id, state="failed", reason=str(exc)[:256])
+                self._clear_local_preview_if(operation_id)
+            except Exception as exc:
+                if dispatched:
+                    try:
+                        restore = self._send_local_restore(preview, operation_id)
+                        self.journal.update(operation_id, state="failed", restore_state="succeeded", restored=True, resolved_by=restore["matched_by"], reason=f"screen preview was not confirmed; baseline restored: {str(exc)[:140]}")
+                        self._clear_local_preview_if(operation_id)
+                    except Exception as restore_error:
+                        self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({"restore_state": "unknown", "restore_started": False}))
+                        self.journal.update(operation_id, state="unknown", restore_state="unknown", reason=f"screen selection/readback failed; baseline restoration is unknown: {str(restore_error)[:180]}")
+                else:
+                    self.journal.update(operation_id, state="failed", reason=str(exc)[:256])
+                    self._clear_local_preview_if(operation_id)
+
+    def local_display_confirm(self, preview_id: str) -> dict[str, Any]:
+        preview_id = self._local_output_key(preview_id)
+        with self._mutation_lock:
+            preview = self.store.get("local_display_preview")
+            operation = self.journal.get(preview_id)
+            if not preview or preview.get("preview_id") != preview_id:
+                if operation and operation.get("kind") == "display.selection.preview" and operation.get("state") == "succeeded":
+                    return {"protocol_version": 1, "operation": operation, "preview": None}
+                raise ApiError("screen preview is unavailable or expired", 409, "preview_not_found")
+            if preview.get("restore_started"):
+                raise ApiError("screen preview restoration is already in progress", 409, "preview_expired")
+            if preview.get("restore_state") in {"failed", "unknown"}:
+                raise ApiError("screen preview restoration needs to be retried or inspected before it can be kept", 409, "restore_not_confirmed")
+            if preview.get("deadline") is None:
+                raise ApiError("screen preview is still being applied", 409, "preview_not_ready")
+            if float(preview.get("deadline", 0)) <= self.clock():
+                raise ApiError("screen preview deadline has expired", 409, "preview_expired")
+            latest, _ = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+            if not self._local_readback_matches(preview, latest, target=True):
+                raise ApiError("active screen readback does not match the preview target", 409, "readback_not_confirmed")
+            self.journal.update(preview_id, state="succeeded", outcome="active_screen_visible_and_confirmed", reason="Owner confirmed the selected Gaming Mode screen")
+            operation = self.journal.get(preview_id) or operation
+            self._clear_local_preview_if(preview_id)
+            return {"protocol_version": 1, "operation": operation, "preview": None}
+
+    def local_display_revert(self, preview_id: str) -> dict[str, Any]:
+        preview_id = self._local_output_key(preview_id)
+        with self._mutation_lock:
+            preview = self.store.get("local_display_preview")
+            original = self.journal.get(preview_id)
+            if not preview or preview.get("preview_id") != preview_id:
+                if original and original.get("kind") == "display.selection.preview" and original.get("restore_state") == "succeeded":
+                    return {"protocol_version": 1, "operation": original, "preview": None}
+                raise ApiError("screen preview is unavailable or expired", 409, "preview_not_found")
+            restore_state = preview.get("restore_state")
+            if preview.get("restore_started") and restore_state not in {"failed", "unknown"}:
+                raise ApiError("screen preview restoration is already in progress", 409, "preview_expired")
+            if restore_state in {"failed", "unknown"}:
+                latest, _ = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+                if self._local_readback_matches(preview, latest, target=False):
+                    self.journal.update(preview_id, state="failed", restore_state="succeeded", restored=True, resolved_by="active_output_and_mode", reason="baseline screen was already restored")
+                    self._clear_local_preview_if(preview_id)
+                    return {"protocol_version": 1, "operation": self.journal.get(preview_id) or original, "preview": None}
+            if restore_state not in {"failed", "unknown"} and preview.get("deadline") is not None and float(preview.get("deadline", 0)) <= self.clock():
+                raise ApiError("screen preview deadline has expired; host restoration is responsible", 409, "preview_expired")
+            restore_operation = self.journal.internal("display.selection.revert", {"preview_id": preview_id}, owner=LOCAL_OPERATION_OWNER)
+            self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({
+                "restore_started": True, "restore_state": "dispatched", "restore_operation_id": restore_operation["id"],
+            }))
+            self._spawn(restore_operation["id"], lambda: self._run_local_display_revert(preview_id, restore_operation["id"]))
+            return {
+                "protocol_version": 1,
+                "operation": self.journal.get(restore_operation["id"]) or restore_operation,
+                "preview": self._public_local_preview(self.store.get("local_display_preview")),
+            }
+
+    def _start_sunshine_restart(self, source: str) -> dict[str, Any]:
+        """Queue one owner-controlled Sunshine recovery operation."""
+        with self._mutation_lock:
+            self._reject_if_conflicting("sunshine_restart")
+            state = self.monitor.refresh_now()
+            if not self.monitor.provider_ready():
+                raise ApiError("Sunshine monitoring/provider is unavailable", 409, "provider_unavailable")
+            if state["state"] != "stopped":
+                raise ApiError("Sunshine is not freshly confirmed stopped", 409, "state_not_stopped")
+            operation = self.journal.internal(
+                "sunshine.restart",
+                {"source": source},
+                owner=LOCAL_OPERATION_OWNER,
+            )
+            self.monitor.set_operation(operation["id"])
+            self._spawn(operation["id"], lambda: self._run_sunshine_restart(operation["id"]))
+            return {"protocol_version": 1, "operation": operation}
+
+    def local_sunshine_restart(self) -> dict[str, Any]:
+        """Start stopped Sunshine through the Decky-owned provider.
+
+        This is deliberately a local Decky RPC rather than a LAN route. The
+        owner bridge must be connected and a fresh provider read must confirm
+        that Sunshine is stopped before the owner receives the recovery
+        command.
+        """
+        return self._start_sunshine_restart("local_decky")
+
+    def _run_local_display_revert(self, preview_id: str, restore_operation_id: str) -> None:
+        with self._mutation_lock:
+            preview = self.store.get("local_display_preview")
+            if not preview or preview.get("preview_id") != preview_id:
+                self.journal.update(restore_operation_id, state="failed", reason="screen preview disappeared before restoration")
+                return
+            try:
+                result = self._send_local_restore(preview, restore_operation_id)
+                self.journal.update(restore_operation_id, state="succeeded", outcome="baseline_screen_restored", restored=True, resolved_by=result["matched_by"], target={"output_key": preview["baseline_output_key"]})
+                self.journal.update(preview_id, state="failed", restore_state="succeeded", restored=True, resolved_by=result["matched_by"], reason="screen preview reverted by owner")
+                self._clear_local_preview_if(preview_id)
+            except DisplayError as exc:
+                self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({"restore_started": False, "restore_state": "failed"}))
+                self.journal.update(restore_operation_id, state="failed", reason=str(exc))
+                self.journal.update(preview_id, restore_state="failed", reason=str(exc))
+            except Exception as exc:
+                self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({"restore_started": False, "restore_state": "unknown"}))
+                self.journal.update(restore_operation_id, state="unknown", reason=f"baseline restoration result is unknown: {str(exc)[:180]}")
+                self.journal.update(preview_id, state="unknown", restore_state="unknown", reason=f"baseline restoration result is unknown: {str(exc)[:180]}")
+
+    def _local_readback_matches(self, preview: dict[str, Any], snapshot: dict[str, Any] | None, *, target: bool) -> bool:
+        if not snapshot or snapshot.get("ready") is not True:
+            return False
+        if snapshot.get("generation") != preview.get("generation"):
+            return False
+        active_key, active_state = resolve_active_output(snapshot.get("outputs", []), snapshot.get("active_output_key"))
+        expected_key = preview.get("target_output_key") if target else preview.get("baseline_output_key")
+        expected_identity = preview.get("target_identity") if target else preview.get("baseline_identity")
+        expected_mode = preview.get("target_mode") if target else preview.get("baseline_mode")
+        if active_state != "known" or active_key != expected_key:
+            return False
+        output = self._local_find_output(snapshot, expected_key)
+        if not output or output.get("connected") is not True or not same_selection_identity(expected_identity, selection_identity(output)):
+            return False
+        return same_mode_profile(expected_mode, self._local_current_mode(output))
+
+    def _send_local_restore(self, preview: dict[str, Any], operation_id: str) -> dict[str, Any]:
+        snapshot, _ = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+        if snapshot is None or snapshot.get("ready") is not True:
+            raise DisplayError("Steam display bridge is unavailable; baseline restore was not sent")
+        if snapshot.get("generation") != preview.get("generation"):
+            raise DisplayError("display topology changed; baseline restore was not sent")
+        selection = self._local_selection_capability(snapshot)
+        if not selection["can_switch_live"]:
+            raise DisplayError("verified screen-selection adapter is unavailable; baseline restore was not sent")
+        baseline = self._local_find_output(snapshot, preview.get("baseline_output_key"))
+        if not baseline or baseline.get("connected") is not True:
+            raise DisplayError("baseline screen disappeared; restore was not sent")
+        if not same_selection_identity(preview.get("baseline_identity"), selection_identity(baseline)):
+            raise DisplayError("baseline screen identity changed; restore was not sent")
+        result = self.bridge.request("select_output", {
+            "output_key": baseline["output_key"], "generation": snapshot["generation"],
+        }, operation_id, timeout=8)
+        if not _result_ok(result):
+            raise BridgeError(str(result.get("reason", "Steam rejected baseline screen restore")))
+        deadline = self.monotonic() + 5.0
+        while self.monotonic() < deadline:
+            latest, _ = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+            if self._local_readback_matches(preview, latest, target=False):
+                return {"matched_by": "active_output_and_mode"}
+            time.sleep(0.05)
+        raise BridgeError("baseline screen restore was sent but active-output readback did not confirm it")
+
+    def _restore_expired_local_preview(self, preview: dict[str, Any]) -> None:
+        with self._mutation_lock:
+            current = self.store.get("local_display_preview")
+            if not current or current.get("preview_id") != preview.get("preview_id") or current.get("restore_started"):
+                return
+            operation_id = current.get("operation_id")
+            if not operation_id:
+                self._clear_local_preview_if(preview.get("preview_id"))
+                return
+            self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({
+                "restore_started": True, "restore_state": "dispatched", "restore_operation_id": operation_id,
+            }))
+            try:
+                result = self._send_local_restore(current, operation_id)
+                self.journal.update(operation_id, state="failed", restore_state="succeeded", restored=True, resolved_by=result["matched_by"], reason="host preview deadline expired; baseline screen restored")
+                self._clear_local_preview_if(preview["preview_id"])
+            except DisplayError as exc:
+                self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({"restore_started": False, "restore_state": "failed"}))
+                self.journal.update(operation_id, state="unknown", restore_state="failed", reason=f"host preview deadline expired; baseline restore was not sent: {str(exc)[:180]}")
+            except Exception as exc:
+                self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({"restore_started": False, "restore_state": "unknown"}))
+                self.journal.update(operation_id, state="unknown", restore_state="unknown", reason=f"host preview deadline expired; baseline restore result is unknown: {str(exc)[:180]}")
+
+    def _reconcile_local_display_preview(self) -> None:
+        preview = self.store.get("local_display_preview")
+        if not isinstance(preview, dict) or not preview.get("preview_id"):
+            return
+        operation = self.journal.get(preview["operation_id"])
+        if operation and operation.get("state") in {"accepted", "dispatched", "unknown"}:
+            snapshot, _ = self.bridge.snapshot(BRIDGE_SNAPSHOT_MAX_AGE)
+            if self._local_readback_matches(preview, snapshot, target=True):
+                if preview.get("deadline") is None:
+                    self.store.mutate(lambda state: state.setdefault("local_display_preview", {}).update({"deadline": self.clock() + LOCAL_DISPLAY_PREVIEW_SECONDS}))
+                self.journal.update(preview["operation_id"], state="observed_return", outcome="target_active_reconciled_after_reload", reason="Active screen readback reconciled after plugin reload")
+            elif self._local_readback_matches(preview, snapshot, target=False):
+                self.journal.update(preview["operation_id"], state="failed", reason="screen preview did not remain active across plugin reload")
+                self._clear_local_preview_if(preview["preview_id"])
+
+    def _clear_local_preview_if(self, preview_id: str | None) -> None:
+        if not preview_id:
+            return
+        self.store.mutate(lambda state: state.__setitem__("local_display_preview", None) if state.get("local_display_preview", {}).get("preview_id") == preview_id else None)
 
     # ---- operations ----------------------------------------------------
 
@@ -1373,6 +2157,7 @@ class HostService:
         with self._mutation_lock:
             if body.get("visible") is not True:
                 raise ApiError("visible must be true to save the current display mode", 400, "owner_confirmation_required")
+            self._reject_if_conflicting("display_save_current")
             if self.store.get("preview") is not None:
                 raise ApiError("a display preview is active; keep or revert it first", 409, "mutation_conflict")
             snapshot, _ = self.bridge.snapshot()
@@ -1486,7 +2271,7 @@ class HostService:
                     self.journal.update(operation_id, state="unknown", reason="provider became unavailable before dispatch")
                     return
                 self.journal.update(operation_id, state="dispatched")
-                result = self.monitor._call(provider.ensure_running)
+                result = self.monitor._call(provider.ensure_running, timeout=self.monitor.RECOVERY_TIMEOUT)
                 if isinstance(result, dict) and result.get("outcome") == "already_running":
                     self.journal.update(operation_id, state="succeeded", outcome="already_running")
                     return
@@ -1524,6 +2309,11 @@ class HostService:
             return operation
 
     def _reject_if_conflicting(self, kind: str, ignore_id: str | None = None) -> None:
+        local_preview = self.store.get("local_display_preview")
+        if local_preview is not None and kind not in {"local_display_confirm", "local_display_revert"}:
+            if kind == "local_display_preview":
+                raise ApiError("a Gaming Mode screen preview is already active", 409, "mutation_conflict")
+            raise ApiError("a Gaming Mode screen preview owns the mutation lane", 409, "mutation_conflict")
         if self.store.get("preview") is not None and kind == "display_preview":
             raise ApiError("a display preview is already active", 409, "mutation_conflict")
         if self.store.get("preview") is not None and kind not in {"display_restore"}:
@@ -1532,6 +2322,7 @@ class HostService:
             "power": ("power.", "display.", "sunshine."),
             "display_preview": ("power.", "display.", "sunshine."),
             "display_restore": ("power.", "display."),
+            "display_preference": ("power.", "display.", "sunshine."),
             "sunshine_restart": ("power.", "display.", "sunshine."),
         }.get(kind, ())
         for operation in self.journal.active():
@@ -1577,10 +2368,11 @@ class HostService:
     def _preview_watchdog(self) -> None:
         while not self._preview_stop.wait(0.25):
             preview = self.store.get("preview")
-            if not preview or preview.get("restore_started"):
-                continue
-            if float(preview.get("deadline", 0)) <= self.clock():
+            if preview and not preview.get("restore_started") and float(preview.get("deadline", 0)) <= self.clock():
                 self._restore_expired_preview(preview)
+            local_preview = self.store.get("local_display_preview")
+            if local_preview and not local_preview.get("restore_started") and local_preview.get("restore_state") not in {"failed", "unknown"} and local_preview.get("deadline") is not None and float(local_preview.get("deadline", 0)) <= self.clock():
+                self._restore_expired_local_preview(local_preview)
 
     def _restore_expired_preview(self, preview: dict[str, Any]) -> None:
         with self._mutation_lock:
@@ -1671,10 +2463,47 @@ class HostService:
         return {key: value.get(key) for key in ("id", "output_identity", "output_id", "mode", "verified_at")}
 
     @staticmethod
+    def _public_remote_output(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value.get(key)
+            for key in ("id", "name", "description", "is_internal", "current_mode_id", "modes", "generation", "rgb_range")
+        }
+
+    @staticmethod
     def _public_preview(value: dict[str, Any] | None) -> dict[str, Any] | None:
         if not value:
             return None
         return {key: value.get(key) for key in ("preview_id", "output_identity", "output_id", "generation", "baseline_mode", "target_mode", "deadline", "restore_state", "created_at")}
+
+    def _public_local_preview(self, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not value:
+            return None
+        operation = self.journal.get(value.get("operation_id")) if value.get("operation_id") else None
+        return {
+            "preview_id": value.get("preview_id"),
+            "state": operation.get("state") if operation else None,
+            "target_output_key": value.get("target_output_key"),
+            "baseline_output_key": value.get("baseline_output_key"),
+            "generation": value.get("generation"),
+            "deadline": value.get("deadline"),
+            "restore_started": value.get("restore_started") is True,
+            "restore_state": value.get("restore_state"),
+            "created_at": value.get("created_at"),
+        }
+
+    def _latest_local_display_operation(self) -> dict[str, Any] | None:
+        operations = self.store.get("operations", {})
+        candidates = [
+            operation for operation in operations.values()
+            if isinstance(operation, dict) and (
+                operation.get("kind", "").startswith("display.selection.")
+                or operation.get("kind") == "display.preference"
+            )
+        ]
+        if not candidates:
+            return None
+        latest = max(candidates, key=lambda operation: operation.get("updated_at", ""))
+        return self.journal.public(latest)
 
     def _default_advertised_host(self) -> str:
         route_host = _route_selected_ipv4()

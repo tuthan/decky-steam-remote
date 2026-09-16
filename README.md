@@ -45,7 +45,7 @@ ssh deck@steamdeck.local 'bash -s' < install.sh
 To install a specific release:
 
 ```sh
-ssh deck@steamdeck.local 'bash -s -- v0.5.3' < install.sh
+ssh deck@steamdeck.local 'bash -s -- v0.5.13' < install.sh
 ```
 
 The installer copies the plugin to `~/homebrew/plugins/steamos-remote` and
@@ -56,7 +56,7 @@ is unavailable, use Decky’s **Reload Plugins** action.
 The installer can also be run directly on the Deck:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.3
+curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.13
 ```
 
 ## Device modes
@@ -71,6 +71,26 @@ On first launch, choose the role that matches the device:
   Decky display bridge alive while the settings panel is closed.
 - **Both** enables both roles independently.
 
+On a Server or Both device, **This device → Display order** shows the
+attached physical-screen inventory and the currently identified Gaming Mode
+screen. When Steam's legacy DisplayManager reports only the logical Gamescope
+surface, the inventory falls back to read-only Linux DRM connector status, so
+HDMI/DP connectors and disconnected ports remain visible. Live screen selection
+remains disabled until the SteamOS build exposes a verified live active-output
+adapter with recovery readback; the view never guesses from display order or
+current resolution. For connected outputs, the list reads the non-sensitive
+EDID display name, vendor, and product ID so a physical monitor can be matched
+to its DP/HDMI connector; hardware serial numbers are not exposed. The Gaming
+Mode monitor switch can save a guarded
+ordered Gamescope `--prefer-output` priority list for the next Gaming Mode
+session and
+reports the current scanout with `gamescopectl` when that control tool is
+available. A confirmed **Restart Gaming Mode now** action can recreate only
+the Gaming Mode session to apply the saved output without entering Desktop
+Mode; it closes running games and briefly interrupts the Steam UI. The plugin
+does not change Desktop Mode, and live connector switching remains unavailable
+on Gamescope builds without a runtime connector override.
+
 Changing roles is an explicit saved setting. Existing host identities,
 listener settings, incoming clients, and recovery profiles are preserved when
 Client mode is added. Pending display recovery is allowed to finish (or can be
@@ -80,7 +100,8 @@ pairing and unresolved operation journal survive Client mode being disabled.
 The Client destination has Remote, Display settings, Power options, and
 Connection details flows. Display previews always offer Revert first, power
 actions require a confirmation, and an ambiguous mutation is never replayed
-automatically; the user must acknowledge an explicit resend.
+automatically; the user must acknowledge an explicit resend. Remote Gaming
+Mode connector ordering is not yet exposed in Client mode.
 
 ## Pairing
 
@@ -98,7 +119,20 @@ flow explains that distinction.
 
 Sunshine monitoring is disabled by default and can only be enabled locally in
 Decky settings. When it is disabled, the server does not probe Decky Sunshine
-and paired clients hide Sunshine status and recovery controls.
+and paired clients hide Sunshine status and recovery controls. Auto-recovery
+is enabled by default once monitoring is enabled: one owner-plugin start
+request is made after a running-to-stopped observation, and the manual
+Recover Sunshine action remains available if the owner cannot recover it.
+On a Server or Both device, the This device view exposes Recover Sunshine
+when the Decky Sunshine owner confirms that its Flatpak is stopped; recovery
+calls the owner plugin and never starts a separate process.
+
+The local Display order page writes a per-user Gamescope session override from
+validated Linux DRM connectors. Reorder screens with gamepad-friendly controls,
+then choose **Save for next session** or **Save and restart Gaming Mode**. The
+page shows the active connector when Gamescope readback is available. Verified
+live connector switching remains disabled on SteamOS builds without a selector
+and recovery readback.
 
 The installable frontend is dependency-free: it uses the native Decky
 component surface when the loader exposes it and retains semantic, accessible
@@ -111,8 +145,8 @@ Update the version in `host/package.json`, commit the change, and push a
 matching tag:
 
 ```sh
-git tag v0.5.3
-git push origin v0.5.3
+git tag v0.5.13
+git push origin v0.5.13
 ```
 
 The `Release` workflow runs the checks, builds the ZIP and SHA256 file, and
