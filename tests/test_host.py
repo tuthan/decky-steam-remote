@@ -196,6 +196,53 @@ class HostTests(unittest.TestCase):
             service.stop()
             temp.cleanup()
 
+    def test_pairing_rejection_is_acknowledged_by_the_requesting_client(self):
+        temp, service = self.make_service()
+        try:
+            request = {
+                "verification_nonce": VERIFICATION_NONCE,
+                "client_name": "Reject me",
+                "client_id": "client-rejection",
+                "scopes": ["status.read"],
+            }
+            pending = service.handle_http("POST", "/v1/pair/request", {}, request)[2]
+            service.reject_pairing(pending["pairing_id"])
+            with self.assertRaises(Exception) as rejected:
+                service.handle_http("POST", "/v1/pair/request", {}, request)
+            self.assertEqual(rejected.exception.status, 409)
+            self.assertEqual(rejected.exception.code, "pairing_rejected")
+            self.assertFalse(service.get_local_status()["pending_pairings"])
+        finally:
+            service.stop()
+            temp.cleanup()
+
+    def test_pairing_cancellation_is_acknowledged_and_idempotent(self):
+        temp, service = self.make_service()
+        try:
+            request = {
+                "verification_nonce": VERIFICATION_NONCE,
+                "client_name": "Cancel me",
+                "client_id": "client-cancellation",
+                "scopes": ["status.read"],
+            }
+            pending = service.handle_http("POST", "/v1/pair/request", {}, request)[2]
+            cancel = {
+                "pairing_id": pending["pairing_id"],
+                "verification_nonce": VERIFICATION_NONCE,
+                "client_id": "client-cancellation",
+            }
+            status, _, response = service.handle_http("POST", "/v1/pair/cancel", {}, cancel)
+            self.assertEqual(status, 200)
+            self.assertEqual(response["state"], "cancelled")
+            self.assertFalse(service.get_local_status()["pending_pairings"])
+            self.assertEqual(service.handle_http("POST", "/v1/pair/cancel", {}, cancel)[2]["state"], "cancelled")
+            with self.assertRaises(Exception) as cancelled:
+                service.handle_http("POST", "/v1/pair/request", {}, request)
+            self.assertEqual(cancelled.exception.code, "pairing_cancelled")
+        finally:
+            service.stop()
+            temp.cleanup()
+
     def test_relay_with_its_own_certificate_cannot_match_the_displayed_code(self):
         """A rogue listener that re-submits the nonce shows different digits."""
         temp, service = self.make_service()
@@ -694,6 +741,40 @@ class HostTests(unittest.TestCase):
             changed = inventory.snapshot()
             self.assertGreater(changed["generation"], initial_generation)
             self.assertTrue(next(output for output in changed["outputs"] if output["connector"] == "HDMI-A-2")["connected"])
+
+    def test_drm_inventory_holds_a_transient_usb_c_disconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("card0-eDP-1", "card0-DP-1"):
+                connector = root / name
+                connector.mkdir()
+                (connector / "status").write_text("connected", encoding="ascii")
+            current_time = [0.0]
+            inventory = DrmInventory(root, clock=lambda: current_time[0], disconnect_hold_seconds=3.0)
+            first = inventory.snapshot()
+            self.assertEqual(first["generation"], 1)
+
+            (root / "card0-DP-1" / "status").write_text("unknown", encoding="ascii")
+            current_time[0] = 1.0
+            held = inventory.snapshot()
+            self.assertEqual(held["generation"], first["generation"])
+            self.assertIn("DP-1", [output["connector"] for output in held["outputs"]])
+
+            (root / "card0-DP-1" / "status").write_text("connected", encoding="ascii")
+            current_time[0] = 2.0
+            restored = inventory.snapshot()
+            self.assertEqual(restored["generation"], first["generation"])
+            self.assertIn("DP-1", [output["connector"] for output in restored["outputs"]])
+
+            (root / "card0-DP-1" / "status").write_text("unknown", encoding="ascii")
+            current_time[0] = 2.5
+            held_again = inventory.snapshot()
+            self.assertEqual(held_again["generation"], first["generation"])
+
+            current_time[0] = 5.5
+            gone = inventory.snapshot()
+            self.assertGreater(gone["generation"], first["generation"])
+            self.assertNotIn("DP-1", [output["connector"] for output in gone["outputs"]])
 
     def test_local_display_uses_drm_connectors_when_steam_reports_gamescope_only(self):
         with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as drm_directory:

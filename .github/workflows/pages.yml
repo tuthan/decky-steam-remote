@@ -1,0 +1,75 @@
+name: Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'site/**'
+      - 'assets/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site
+          # -L dereferences the site/assets -> ../assets symlink so the
+          # published site carries real files. If the checkout did not
+          # restore the symlink, copy the shared assets explicitly.
+          cp -RL site/. _site/
+          if [[ ! -d _site/assets || -L _site/assets ]]; then
+              rm -rf _site/assets
+              cp -R assets _site/assets
+          fi
+          touch _site/.nojekyll
+
+      - name: Check referenced assets exist
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r ref; do
+              if [[ ! -f "_site/${ref}" ]]; then
+                  echo "missing: ${ref}" >&2
+                  missing=1
+              fi
+          done < <(grep -oE '(src|href)="(assets/[^"]+|styles\.css|site\.js|favicon\.svg)"' _site/index.html | sed -E 's/^[a-z]+="//; s/"$//' | sort -u)
+          exit "${missing}"
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

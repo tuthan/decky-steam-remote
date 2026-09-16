@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 _CONNECTOR_ENTRY_RE = re.compile(r"^card(?P<card>[0-9]+)-(?P<connector>[A-Za-z][A-Za-z0-9_.-]*)$")
@@ -15,6 +16,7 @@ _MAX_CONNECTORS = 8
 _MAX_MODES = 256
 _MAX_EDID_BYTES = 32 * 1024
 _EDID_HEADER = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+_DISCONNECT_HOLD_SECONDS = 3.0
 
 
 def _read_text(path: Path) -> str | None:
@@ -156,19 +158,36 @@ def _read_outputs(root: Path) -> list[dict[str, Any]]:
 
 
 class DrmInventory:
-    """Maintain a monotonic topology generation for a DRM inventory."""
+    """Maintain a monotonic topology generation for a DRM inventory.
 
-    def __init__(self, root: str | os.PathLike[str] = "/sys/class/drm"):
+    USB-C DisplayPort hotplug can briefly remove a connector directory (or
+    publish an unreadable status) while the kernel is renegotiating the link.
+    Keep the last stable topology during that short loss window so callers do
+    not show a monitor disappearing and reappearing. Persistent disconnects
+    are still committed after the hold expires.
+    """
+
+    def __init__(
+        self,
+        root: str | os.PathLike[str] = "/sys/class/drm",
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        disconnect_hold_seconds: float = _DISCONNECT_HOLD_SECONDS,
+    ):
         self.root = Path(root)
+        self._clock = clock
+        self._disconnect_hold_seconds = max(0.0, float(disconnect_hold_seconds))
         self._lock = threading.RLock()
         self._signature: tuple[Any, ...] | None = None
+        self._stable_outputs: list[dict[str, Any]] | None = None
+        self._pending_signature: tuple[Any, ...] | None = None
+        self._pending_outputs: list[dict[str, Any]] | None = None
+        self._pending_since: float | None = None
         self._generation = 0
 
-    def snapshot(self) -> dict[str, Any] | None:
-        outputs = _read_outputs(self.root)
-        if not outputs:
-            return None
-        signature = tuple(
+    @staticmethod
+    def _output_signature(outputs: list[dict[str, Any]]) -> tuple[Any, ...]:
+        return tuple(
             (
                 output["output_key"],
                 output["connector"],
@@ -181,12 +200,54 @@ class DrmInventory:
             )
             for output in outputs
         )
+
+    @staticmethod
+    def _has_connected_loss(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> bool:
+        current_by_key = {output.get("output_key"): output for output in current}
+        return any(
+            current_by_key.get(output.get("output_key"), {}).get("connected") is not True
+            for output in previous
+            if output.get("connected") is True
+        )
+
+    def _commit(self, outputs: list[dict[str, Any]], signature: tuple[Any, ...]) -> None:
+        self._signature = signature
+        self._stable_outputs = [{**output, "modes": list(output.get("modes", []))} for output in outputs]
+        self._pending_signature = None
+        self._pending_outputs = None
+        self._pending_since = None
+        self._generation += 1
+
+    def snapshot(self) -> dict[str, Any] | None:
+        outputs = _read_outputs(self.root)
+        signature = self._output_signature(outputs)
         with self._lock:
-            if signature != self._signature:
-                self._signature = signature
-                self._generation += 1
+            if self._stable_outputs is None:
+                if not outputs:
+                    return None
+                self._commit(outputs, signature)
+            elif signature == self._signature:
+                # A hotplug candidate that returns to the stable topology
+                # before the hold expires must not age into a later loss.
+                self._pending_signature = None
+                self._pending_outputs = None
+                self._pending_since = None
+            elif signature != self._signature:
+                now = self._clock()
+                if signature != self._pending_signature:
+                    self._pending_signature = signature
+                    self._pending_outputs = outputs
+                    self._pending_since = now
+                pending_outputs = self._pending_outputs or []
+                pending_since = self._pending_since if self._pending_since is not None else now
+                disconnecting = self._has_connected_loss(self._stable_outputs, pending_outputs)
+                settled = now - pending_since >= self._disconnect_hold_seconds
+                if not disconnecting or settled:
+                    self._commit(pending_outputs, signature)
+            if not self._stable_outputs:
+                return None
             generation = self._generation
-            snapshot_outputs = [{**output, "generation": generation} for output in outputs]
+            snapshot_outputs = [{**output, "generation": generation} for output in self._stable_outputs]
         return {
             "ready": True,
             "reason": "",

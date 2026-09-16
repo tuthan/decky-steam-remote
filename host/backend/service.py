@@ -914,6 +914,9 @@ class HostService:
                 channel_binding=channel_binding,
                 client_channel_binding=client_channel_binding,
             )
+        if method == "POST" and path == "/v1/pair/cancel":
+            self._enforce_rate_limit("pair:" + (peer_address or "direct"), 120, 60.0)
+            return 200, {}, self._handle_pair_cancel(body)
         if method == "GET" and path == "/v1/discovery":
             tls = self._ensure_tls_material()
             if not tls.get("ready") or not tls.get("fingerprint"):
@@ -1011,19 +1014,17 @@ class HostService:
         return match
 
     def _find_verification_pairing(self, client_id: str, nonce: str) -> tuple[str, dict[str, Any]] | None:
-        """Find the client-created request, rejecting an ambiguous nonce reuse.
+        """Find the client-created request, including terminal outcomes.
 
         Matching happens on the stored nonce hash, so the slow certificate-bound
-        derivation never runs inside this loop.
+        derivation never runs inside this loop. Terminal records are retained
+        briefly so the requesting client can receive an explicit rejection or
+        cancellation acknowledgement instead of seeing a generic new request.
         """
         nonce_hash = _hash_secret(nonce)
         match: tuple[str, dict[str, Any]] | None = None
         for candidate_id, candidate in self.store.get("pairings", {}).items():
-            if candidate.get("pairing_method") != "verification" or candidate.get("status") in {
-                "rejected", "expired", "consumed", "superseded",
-            }:
-                continue
-            if _pairing_expiry(candidate) <= self.clock():
+            if candidate.get("pairing_method") != "verification":
                 continue
             candidate_hash = candidate.get("verification_nonce_hash")
             if not isinstance(candidate_hash, str) or not hmac.compare_digest(nonce_hash, candidate_hash):
@@ -1103,9 +1104,9 @@ class HostService:
                 pairing_id = identifier(body.get("pairing_id"), "pairing_id")
                 secret = str(body.get("secret"))
             pairing = self.store.get("pairings", {}).get(pairing_id)
-            if not pairing or pairing.get("status") in {"rejected", "expired", "consumed", "superseded"}:
+            if not pairing:
                 raise ApiError("pairing is not available", 404, "pairing_not_found")
-            if _pairing_expiry(pairing) <= self.clock():
+            if pairing.get("status") in {"created", "pending"} and _pairing_expiry(pairing) <= self.clock():
                 self.store.mutate(lambda state: self._set_pairing_status(state, pairing_id, "expired"))
                 raise ApiError("pairing has expired", 410, "pairing_expired")
             if (
@@ -1165,6 +1166,14 @@ class HostService:
                 if pairing_session_token:
                     response["pairing_session"] = pairing_session_token
                 return response
+            if pairing.get("status") == "rejected":
+                raise ApiError("pairing was rejected by the device owner", 409, "pairing_rejected")
+            if pairing.get("status") == "cancelled":
+                raise ApiError("pairing was cancelled by the requesting client", 409, "pairing_cancelled")
+            if pairing.get("status") == "expired":
+                raise ApiError("pairing has expired", 410, "pairing_expired")
+            if pairing.get("status") in {"consumed", "superseded"}:
+                raise ApiError("pairing is not available", 404, "pairing_not_found")
             if pairing.get("status") != "approved":
                 raise ApiError("pairing is not approved", 409, "pairing_not_approved")
             token = self._approved_tokens.pop(pairing_id, None)
@@ -1186,6 +1195,53 @@ class HostService:
                 },
                 "wake_target": self._wake_target(),
             }
+
+    def _handle_pair_cancel(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Cancel a verification request after authenticating its nonce.
+
+        The requesting client has no bearer token yet. Its private nonce is
+        therefore the cancellation proof; the optional pairing session is
+        checked as an additional binding when the initial exchange created
+        one. Returning terminal states idempotently lets either side observe
+        the same outcome when reject and cancel race each other.
+        """
+        self._prune_pairings()
+        pairing_id = identifier(body.get("pairing_id"), "pairing_id")
+        nonce = verification_nonce(body.get("verification_nonce"))
+        client_id = identifier(body.get("client_id"), "client_id")
+        pairing_session_value = pairing_session(body["pairing_session"]) if "pairing_session" in body else None
+        with self._pairing_lock:
+            pairing = self.store.get("pairings", {}).get(pairing_id)
+            if not isinstance(pairing, dict) or pairing.get("pairing_method") != "verification":
+                raise ApiError("pairing is not available", 404, "pairing_not_found")
+            if pairing.get("client_id") != client_id:
+                raise ApiError("pairing cancellation is not authorized", 401, "unauthorized")
+            if not _constant_time_hash_match(nonce, str(pairing.get("verification_nonce_hash", ""))):
+                raise ApiError("pairing verification code is invalid", 401, "unauthorized")
+            expected_session_hash = pairing.get("pairing_session_hash")
+            if pairing_session_value is not None:
+                if not expected_session_hash or not _constant_time_hash_match(pairing_session_value, str(expected_session_hash)):
+                    raise ApiError("pairing session is invalid", 401, "unauthorized")
+
+            status = pairing.get("status")
+            if status in {"created", "pending"} and _pairing_expiry(pairing) <= self.clock():
+                self.store.mutate(lambda state: self._set_pairing_status(state, pairing_id, "expired"))
+                status = "expired"
+            elif status == "pending":
+                self.store.mutate(lambda state: self._set_pairing_status(state, pairing_id, "cancelled"))
+                status = "cancelled"
+            elif status in {"cancelled", "rejected", "expired"}:
+                pass
+            elif status == "approved":
+                raise ApiError("pairing was already approved", 409, "pairing_already_approved")
+            else:
+                raise ApiError("pairing is not available", 404, "pairing_not_found")
+
+        return {
+            "protocol_version": 1,
+            "state": status,
+            "pairing_id": pairing_id,
+        }
 
     # ---- status --------------------------------------------------------
 

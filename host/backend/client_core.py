@@ -403,6 +403,28 @@ class RemoteClient:
             body["pairing_session"] = pairing_session
         return self.request("POST", "/v1/pair/request", body, token=None, pairing=first_request or not pairing_session)
 
+    def cancel_pairing(
+        self,
+        pairing_id: str,
+        nonce: str,
+        client_id: str,
+        *,
+        pairing_session: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel this client's pending verification request on the host."""
+        body: dict[str, Any] = {
+            "pairing_id": pairing_id,
+            "verification_nonce": nonce,
+            "client_id": client_id,
+        }
+        if pairing_session:
+            body["pairing_session"] = pairing_session
+        # The nonce/session authenticates this one short-lived pairing record;
+        # it is not a bearer credential and must not be sent as Authorization.
+        # An empty explicit token suppresses the saved remote bearer token;
+        # this route is authenticated by the nonce/session proof instead.
+        return self.request("POST", "/v1/pair/cancel", body, token="")
+
     def revoke_self(self, request_id: str) -> dict[str, Any]:
         return self.mutation("/v1/pair/revoke-self", {"request_id": request_id})
 

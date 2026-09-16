@@ -3,3 +3,4 @@ __pycache__/
 host/dist/index.js
 artifacts/*.zip
 artifacts/*.sha256
+_site/

@@ -82,6 +82,25 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             validate_route_body("POST", "/v1/pair/request", {**common, "pairing_code": "1234-567"})
 
+    def test_pair_cancel_requires_the_requesting_clients_nonce(self):
+        body = {
+            "pairing_id": "pair-test",
+            "verification_nonce": NONCE_VECTOR,
+            "client_id": "client-test",
+        }
+        self.assertEqual(validate_route_body("POST", "/v1/pair/cancel", body), body)
+        with_session = {**body, "pairing_session": "session-value-123456"}
+        self.assertEqual(validate_route_body("POST", "/v1/pair/cancel", with_session), with_session)
+        for changed in (
+            {**body, "verification_nonce": "bad"},
+            {**body, "client_id": ""},
+            {**body, "extra": True},
+            {key: value for key, value in body.items() if key != "verification_nonce"},
+        ):
+            with self.subTest(body=changed):
+                with self.assertRaises(ProtocolError):
+                    validate_route_body("POST", "/v1/pair/cancel", changed)
+
     def test_legacy_client_chosen_verification_code_is_refused(self):
         common = {"client_id": "client-test", "client_name": "Test", "scopes": ["status.read"]}
         with self.assertRaises(ProtocolError) as refused:

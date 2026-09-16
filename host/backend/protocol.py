@@ -27,6 +27,7 @@ MUTATING_ROUTES = frozenset({
     "/v1/display/order/automatic",
     "/v1/sunshine/restart",
     "/v1/pair/revoke-self",
+    "/v1/pair/cancel",
 })
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,253}$")
@@ -188,6 +189,17 @@ def validate_route_body(method: str, path: str, body: dict[str, Any] | None) -> 
         identifier(body.get("client_id"), "client_id")
         client_name(body.get("client_name"))
         validate_scopes(body.get("scopes"))
+        return body
+    if path == "/v1/pair/cancel":
+        allowed = {"pairing_id", "verification_nonce", "pairing_session", "client_id"}
+        required = {"pairing_id", "verification_nonce", "client_id"}
+        if set(body) not in (required, allowed):
+            raise ProtocolError("pairing cancellation accepts pairing_id, verification_nonce, client_id, and optional pairing_session")
+        identifier(body.get("pairing_id"), "pairing_id")
+        verification_nonce(body.get("verification_nonce"))
+        identifier(body.get("client_id"), "client_id")
+        if "pairing_session" in body:
+            pairing_session(body.get("pairing_session"))
         return body
     if path == "/v1/power":
         request_id(body)

@@ -46,6 +46,8 @@ def bridge_snapshot(current: str = "3352", generation: int = 4) -> dict:
 class FakeRemoteCore:
     def __init__(self):
         self.approved = False
+        self.cancelled = False
+        self.rejected = False
         self.unknown_mutation = False
         self.mutations: list[tuple[str, dict]] = []
 
@@ -57,6 +59,10 @@ class FakeRemoteCore:
                 "pairing_session": "pair-session-1",
                 "expires_at": time.time() + 120,
             }
+        if self.cancelled:
+            return {"state": "cancelled", "pairing_id": "pair-remote-1"}
+        if self.rejected:
+            return {"state": "rejected", "pairing_id": "pair-remote-1"}
         if not self.approved:
             return {"state": "pending", "pairing_id": "pair-remote-1", "expires_at": time.time() + 120}
         return {
@@ -68,6 +74,10 @@ class FakeRemoteCore:
             },
             "wake_target": {"available": False, "reason": "not configured"},
         }
+
+    def cancel_pairing(self, pairing_id, nonce, client_id, *, pairing_session=None):
+        self.cancelled = True
+        return {"state": "cancelled", "pairing_id": pairing_id}
 
     def status(self):
         return {
@@ -216,6 +226,36 @@ class ClientTests(unittest.TestCase):
                 self.assertNotIn("remote-secret-token", json.dumps(public))
             finally:
                 restored.stop()
+
+    def test_cancel_pairing_waits_for_remote_ack_before_clearing_local_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core = FakeRemoteCore()
+            service = ClientService(directory, core_factory=lambda *args, **kwargs: core)
+            service.start()
+            try:
+                pending = service.request_pairing(REMOTE_CANDIDATE)
+                cancelled = service.cancel_pairing(pending["id"])
+                self.assertTrue(cancelled["cancelled"])
+                self.assertTrue(cancelled["acknowledged"])
+                self.assertEqual(cancelled["state"], "cancelled")
+                self.assertIsNone(service.public_status()["pending_pairing"])
+                self.assertTrue(core.cancelled)
+            finally:
+                service.stop()
+
+    def test_rejected_pairing_is_kept_as_an_explicit_terminal_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core = FakeRemoteCore()
+            service = ClientService(directory, core_factory=lambda *args, **kwargs: core)
+            service.start()
+            try:
+                pending = service.request_pairing(REMOTE_CANDIDATE)
+                core.rejected = True
+                rejected = service.poll_pairing(pending["id"])
+                self.assertEqual(rejected["status"], "rejected")
+                self.assertEqual(rejected["last_error"], "Pairing was declined on the other device.")
+            finally:
+                service.stop()
 
     def test_discovery_deduplicates_identity_and_reports_scan_failures(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1518,7 +1518,13 @@
         updateCurrentVersion(value);
         setSunshineMonitoring(value?.settings?.monitor_sunshine === true);
         applyRole(value);
-        setSettings(value);
+        setSettings(previous => ({
+          ...value,
+          // Local display order is an additive resource fetched only while
+          // its page is open. Keep the last complete inventory during the
+          // global settings poll so it cannot flash away between refreshes.
+          ...(previous?.local_display_order ? {local_display_order: previous.local_display_order} : {}),
+        }));
         const client = value?.client || {};
         if (client.client_name && viewRef.current === "loading") setDraftName(client.client_name);
         const selectedMode = value?.mode?.selected;
@@ -1531,7 +1537,7 @@
           else if (roleHasClient(value?.mode?.effective ?? value?.device_mode)) navigate(client.remote ? "remote" : "remote-setup");
           else navigate("this-device");
         }
-        if (client.pending_pairing && viewRef.current === "remote-setup") {
+        if (client.pending_pairing && ["sending", "pending", "waiting"].includes(client.pending_pairing.status) && viewRef.current === "remote-setup") {
           setPendingPairing(client.pending_pairing);
           navigate("pairing");
         }
@@ -1837,9 +1843,10 @@
 
     function renderRemoteSetup() {
       const pending = client.pending_pairing || pendingPairing;
+      const resumable = pending && ["sending", "pending", "waiting"].includes(pending.status);
       return React.createElement(PanelSection, {title: "Connect a remote device"},
         React.createElement(PanelSectionRow, {focusKey: "remote-setup.explanation"}, React.createElement(Text, null, "On the other device, install SteamOS Companion and enable Server or Both. Connect both devices to the same local network.")),
-        pending && React.createElement(PanelSectionRow, {focusKey: "remote-setup.resume"}, React.createElement(Button, {label: "Resume pairing", onClick: () => {setPendingPairing(pending); pairingRef.current = pending.id; navigate("pairing");}, focusKey: "remote-setup.resume"})),
+        resumable && React.createElement(PanelSectionRow, {focusKey: "remote-setup.resume"}, React.createElement(Button, {label: "Resume pairing", onClick: () => {setPendingPairing(pending); pairingRef.current = pending.id; navigate("pairing");}, focusKey: "remote-setup.resume"})),
         scan?.state === "searching"
           ? React.createElement(PanelSectionRow, {focusKey: "discovery.cancel"}, React.createElement(Text, {live: true}, "Looking for SteamOS Companion devices…"), React.createElement(Button, {label: "Cancel", onClick: async () => {await run("cancel_discovery", {scan_id: scan.scan_id}); scanRef.current = null; setScan({...scan, state: "cancelled"});}, focusKey: "discovery.cancel"}))
           : React.createElement(PanelSectionRow, {focusKey: "discovery.find"}, React.createElement(Button, {label: "Find devices", onClick: () => void startScan(), disabled: Boolean(busy), focusKey: "discovery.find"})),
@@ -1889,12 +1896,35 @@
       if (!item) return renderRemoteSetup();
       const seconds = remaining(item.expires_at);
       const code = item.comparison_code || "--------";
-      const expired = seconds !== null && seconds <= 0;
+      const expired = item.status === "expired" || (seconds !== null && seconds <= 0);
+      const rejected = item.status === "rejected";
+      const cancelled = item.status === "cancelled";
+      const terminal = expired || rejected || cancelled;
+      const statusText = rejected
+        ? "Pairing was declined on the other device."
+        : cancelled
+          ? "Pairing request was cancelled."
+          : expired
+            ? "Expired"
+            : `Expires in ${seconds === null ? "unknown" : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`}`;
       return React.createElement(PanelSection, {title: "Pairing"},
         React.createElement(PanelSectionRow, {focusKey: "pairing.endpoint"}, React.createElement(Text, null, item.name || item.endpoint), React.createElement(Text, {muted: true}, item.endpoint)),
-        React.createElement(PanelSectionRow, {focusKey: "pairing.code"}, React.createElement(Text, null, "Compare the code"), React.createElement("div", {role: "status", "aria-label": `Pairing comparison code ${code}`, style: {fontSize: "36px", fontFamily: "monospace", fontWeight: "bold", letterSpacing: "4px", marginTop: "8px", color: UI_COLORS.accent}}, code.replace(/^(....)(....)$/, "$1 $2")), React.createElement(Text, null, expired ? "Expired" : `Expires in ${seconds === null ? "unknown" : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`}`)),
+        React.createElement(PanelSectionRow, {focusKey: "pairing.code"}, React.createElement(Text, null, "Compare the code"), React.createElement("div", {role: "status", "aria-label": `Pairing comparison code ${code}`, style: {fontSize: "36px", fontFamily: "monospace", fontWeight: "bold", letterSpacing: "4px", marginTop: "8px", color: UI_COLORS.accent}}, code.replace(/^(....)(....)$/, "$1 $2")), React.createElement(Text, null, statusText)),
         React.createElement(PanelSectionRow, {focusKey: "pairing.instructions"}, React.createElement(Text, null, "On the other device, open SteamOS Companion → This device. Approve only if both codes match."), React.createElement(Text, {live: true}, item.last_error || "Waiting for approval…")),
-        React.createElement(PanelSectionRow, {focusKey: "pairing.cancel"}, React.createElement(Button, {label: "Cancel request", onClick: async () => {await run("cancel_remote_pairing", {pending_id: item.id}); pairingRef.current = null; setPendingPairing(null); navigate("remote-setup");}, focusKey: "pairing.cancel"})),
+        React.createElement(PanelSectionRow, {focusKey: "pairing.cancel"}, React.createElement(Button, {label: terminal ? "Back" : "Cancel request", onClick: async () => {
+          if (terminal) {
+            pairingRef.current = null;
+            setPendingPairing(null);
+            navigate("remote-setup");
+            return;
+          }
+          const value = await run("cancel_remote_pairing", {pending_id: item.id});
+          if (value?.cancelled) {
+            pairingRef.current = null;
+            setPendingPairing(null);
+            navigate("remote-setup");
+          }
+        }, focusKey: "pairing.cancel"})),
         React.createElement(PanelSectionRow, {focusKey: "pairing.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("remote-setup"), focusKey: "pairing.back"}))
       );
     }
@@ -2044,17 +2074,6 @@
         return value;
       };
 
-      if (modal?.kind === "remote-display-order-restart") {
-        return React.createElement(PanelSection, {title: "Remote Gaming Mode display order"}, React.createElement(ConfirmModal, {
-          title: "Save and restart remote Gaming Mode?",
-          body: `Running games and the Steam UI on ${identityName()} will close. This device will remain running.`,
-          confirmLabel: "Save and restart remote",
-          busy: Boolean(busy),
-          onCancel: () => setModal(null),
-          onConfirm: async () => {setModal(null); await saveOrder(true);},
-        }));
-      }
-
       return React.createElement(PanelSection, {title: "Remote Gaming Mode display order"},
         React.createElement(PanelSectionRow, {focusKey: "remote-order.target"},
           React.createElement(Text, null, `Target device: ${identityName()}`),
@@ -2077,7 +2096,15 @@
         React.createElement(PanelSectionRow, {focusKey: "remote-order.automatic"}, React.createElement(Button, {label: "Use automatic display order", disabled: Boolean(busy) || !remote?.display_order || order.unsupported === true, onClick: async () => {const value = await run("remote_display_order_reset", {}, "Remote automatic display order restored"); if (value) {remoteOutputOrderTouchedRef.current = false; setRemoteOutputOrder([]);}}, focusKey: "remote-order.automatic.button"})),
         renderActionSummary(),
         React.createElement(PanelSectionRow, {focusKey: "remote-order.refresh"}, React.createElement(Button, {label: "Refresh", disabled: Boolean(busy), onClick: () => {remoteOutputOrderTouchedRef.current = false; void loadRemoteDisplayOrder();}, focusKey: "remote-order.refresh"})),
-        React.createElement(PanelSectionRow, {focusKey: "remote-order.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("remote"), focusKey: "remote-order.back"}))
+        React.createElement(PanelSectionRow, {focusKey: "remote-order.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("remote"), focusKey: "remote-order.back"})),
+        modal?.kind === "remote-display-order-restart" && React.createElement(ConfirmModal, {
+          title: "Save and restart remote Gaming Mode?",
+          body: `Running games and the Steam UI on ${identityName()} will close. This device will remain running.`,
+          confirmLabel: "Save and restart remote",
+          busy: Boolean(busy),
+          onCancel: () => setModal(null),
+          onConfirm: async () => {setModal(null); await saveOrder(true);},
+        })
       );
     }
 
@@ -2293,17 +2320,6 @@
         return value;
       };
 
-      if (modal?.kind === "local-display-order-restart") {
-        return React.createElement(PanelSection, {title: "This device · Gaming Mode display order"}, React.createElement(ConfirmModal, {
-          title: "Save and restart Gaming Mode on this device?",
-          body: "Running games and the Steam UI on this device will close. The paired remote device will not be affected.",
-          confirmLabel: "Save and restart this device",
-          busy: Boolean(busy),
-          onCancel: () => setModal(null),
-          onConfirm: async () => {setModal(null); await saveOrder(true);},
-        }));
-      }
-
       return React.createElement(PanelSection, {title: "This device · Gaming Mode display order"},
         React.createElement(PanelSectionRow, {focusKey: "local-order.target"},
           React.createElement(Text, null, "Target device: This device"),
@@ -2325,7 +2341,15 @@
         React.createElement(PanelSectionRow, {focusKey: "local-order.save-restart"}, React.createElement(Button, {label: "Save and restart Gaming Mode", disabled: !canSave || order.restart_available !== true, onClick: () => setModal({kind: "local-display-order-restart"}), focusKey: "local-order.save-restart.button"})),
         React.createElement(PanelSectionRow, {focusKey: "local-order.automatic"}, React.createElement(Button, {label: "Use automatic display order", disabled: Boolean(busy) || !settings?.local_display_order, onClick: async () => {const value = await run("local_display_order_reset", {}, "Local automatic display order restored"); if (value) {localDisplayOrderTouchedRef.current = false; setLocalOutputOrder([]);}}, focusKey: "local-order.automatic.button"})),
         React.createElement(PanelSectionRow, {focusKey: "local-order.refresh"}, React.createElement(Button, {label: "Refresh", disabled: Boolean(busy), onClick: () => {localDisplayOrderTouchedRef.current = false; void loadLocalDisplayOrder();}, focusKey: "local-order.refresh"})),
-        React.createElement(PanelSectionRow, {focusKey: "local-order.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-order.back"}))
+        React.createElement(PanelSectionRow, {focusKey: "local-order.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-order.back"})),
+        modal?.kind === "local-display-order-restart" && React.createElement(ConfirmModal, {
+          title: "Save and restart Gaming Mode on this device?",
+          body: "Running games and the Steam UI on this device will close. The paired remote device will not be affected.",
+          confirmLabel: "Save and restart this device",
+          busy: Boolean(busy),
+          onCancel: () => setModal(null),
+          onConfirm: async () => {setModal(null); await saveOrder(true);},
+        })
       );
     }
 
@@ -2368,17 +2392,6 @@
         if (value) localOutputOrderTouchedRef.current = false;
         return value;
       };
-
-      if (modal?.kind === "save-restart-gamescope") {
-        return React.createElement(PanelSection, {title: "Display order"}, React.createElement(ConfirmModal, {
-          title: "Save and restart Gaming Mode?",
-          body: "Running games and Steam UI will close. Gaming Mode will restart using this display order.",
-          confirmLabel: "Save and restart",
-          busy: Boolean(busy),
-          onCancel: () => setModal(null),
-          onConfirm: async () => {setModal(null); await saveOrder(true);},
-        }));
-      }
 
       return React.createElement(PanelSection, {title: "Display order"},
         React.createElement(PanelSectionRow, {focusKey: "local-display.summary"},
@@ -2423,7 +2436,15 @@
         })),
         lastOperation && lastOperation.state === "failed" && React.createElement(PanelSectionRow, {focusKey: "local-display.failure"}, React.createElement(Text, {live: true}, "Last change failed: " + (lastOperation.reason || "unknown reason"))),
         React.createElement(PanelSectionRow, {focusKey: "local-display.refresh"}, React.createElement(Button, {label: "Refresh", disabled: Boolean(busy), onClick: () => {localOutputOrderTouchedRef.current = false; void loadLocalDisplay();}, focusKey: "local-display.refresh"})),
-        React.createElement(PanelSectionRow, {focusKey: "local-display.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-display.back"}))
+        React.createElement(PanelSectionRow, {focusKey: "local-display.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-display.back"})),
+        modal?.kind === "save-restart-gamescope" && React.createElement(ConfirmModal, {
+          title: "Save and restart Gaming Mode?",
+          body: "Running games and Steam UI will close. Gaming Mode will restart using this display order.",
+          confirmLabel: "Save and restart",
+          busy: Boolean(busy),
+          onCancel: () => setModal(null),
+          onConfirm: async () => {setModal(null); await saveOrder(true);},
+        })
       );
     }
 

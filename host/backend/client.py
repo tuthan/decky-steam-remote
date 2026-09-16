@@ -711,6 +711,9 @@ class ClientService:
             if exc.code in {"pairing_rejected", "rejected"}:
                 self._update_pending(pending["id"], {"status": "rejected", "last_error": "Pairing was declined on the other device."})
                 return self._public_pending(self.store.get("pending_pairing")) or {}
+            if exc.code in {"pairing_cancelled", "cancelled"}:
+                self._update_pending(pending["id"], {"status": "cancelled", "last_error": "Pairing was cancelled on the other device."})
+                return self._public_pending(self.store.get("pending_pairing")) or {}
             self._update_pending(pending["id"], {"status": "waiting", "last_error": _safe_text(exc), "retry_after": exc.retry_after})
             return self._public_pending(self.store.get("pending_pairing")) or {}
         except IdentityMismatch as exc:
@@ -720,6 +723,15 @@ class ClientService:
             self._update_pending(pending["id"], {"status": "waiting", "last_error": _safe_text(exc), "retry_after": exc.retry_after})
             return self._public_pending(self.store.get("pending_pairing")) or {}
         state = str(response.get("state", "pending"))
+        if state == "rejected":
+            self._update_pending(pending["id"], {"status": "rejected", "last_error": "Pairing was declined on the other device.", "retry_after": None})
+            return self._public_pending(self.store.get("pending_pairing")) or {}
+        if state == "cancelled":
+            self._update_pending(pending["id"], {"status": "cancelled", "last_error": "Pairing was cancelled on the other device.", "retry_after": None})
+            return self._public_pending(self.store.get("pending_pairing")) or {}
+        if state == "expired":
+            self._update_pending(pending["id"], {"status": "expired", "last_error": "This pairing request expired.", "retry_after": None})
+            return self._public_pending(self.store.get("pending_pairing")) or {}
         if state != "approved":
             self._update_pending(pending["id"], {"status": state if state in {"pending", "waiting"} else "pending", "last_error": None, "retry_after": None})
             return self._public_pending(self.store.get("pending_pairing")) or {}
@@ -769,8 +781,54 @@ class ClientService:
             pending_id = identifier(pending_id, "pending_id")
         pending = self._state().get("pending_pairing")
         if isinstance(pending, dict) and (pending_id is None or pending.get("id") == pending_id):
-            self.store.mutate(lambda state: state.__setitem__("pending_pairing", None))
-            return {"cancelled": True, "server_request_may_remain": True}
+            pairing_id = pending.get("pairing_id")
+            nonce = pending.get("nonce")
+            client_id = pending.get("client_id")
+            if not all(isinstance(value, str) and value for value in (pairing_id, nonce, client_id)):
+                # A request that failed before returning its host pairing ID
+                # cannot be cancelled remotely. Keep the old best-effort
+                # result explicit rather than claiming that the host acked it.
+                self.store.mutate(lambda state: state.__setitem__("pending_pairing", None))
+                return {"cancelled": True, "acknowledged": False, "server_request_may_remain": True}
+            try:
+                cancel = getattr(self._core(pending), "cancel_pairing", None)
+                if not callable(cancel):
+                    raise ClientError("the remote device cannot cancel this pairing request", "client_incompatible")
+                response = cancel(
+                    pairing_id,
+                    nonce,
+                    client_id,
+                    pairing_session=pending.get("pairing_session"),
+                )
+                if not isinstance(response, dict):
+                    raise ClientError("the device returned an invalid pairing cancellation response", "invalid_response")
+            except ClientResponseError as exc:
+                if exc.code in {"pairing_not_found", "pairing_expired", "pairing_consumed"}:
+                    state = "expired"
+                elif exc.code in {"pairing_rejected", "rejected"}:
+                    state = "rejected"
+                elif exc.code in {"pairing_cancelled", "cancelled"}:
+                    state = "cancelled"
+                else:
+                    self._update_pending(pending["id"], {"status": "waiting", "last_error": _safe_text(exc), "retry_after": exc.retry_after})
+                    raise
+            except Exception as exc:
+                self._update_pending(pending["id"], {"status": "waiting", "last_error": _safe_text(exc), "retry_after": getattr(exc, "retry_after", None)})
+                raise
+            else:
+                state = str(response.get("state", "cancelled"))
+                if state == "approved":
+                    self._update_pending(pending["id"], {"status": "waiting", "last_error": "Pairing was approved before it could be cancelled."})
+                    raise ClientError("the pairing request was already approved", "pairing_already_approved")
+                if state not in {"cancelled", "rejected", "expired"}:
+                    self._update_pending(pending["id"], {"status": "waiting", "last_error": "The device returned an invalid pairing cancellation state."})
+                    raise ClientError("the device returned an invalid pairing cancellation state", "invalid_response")
+            self.store.mutate(
+                lambda state: state.__setitem__("pending_pairing", None)
+                if isinstance(state.get("pending_pairing"), dict) and state["pending_pairing"].get("id") == pending["id"]
+                else None
+            )
+            return {"cancelled": True, "acknowledged": True, "state": state, "server_request_may_remain": False}
         return {"cancelled": True, "server_request_may_remain": False}
 
     def use_staged_remote(self, use: bool) -> dict[str, Any]:
@@ -789,6 +847,10 @@ class ClientService:
             status = "identity_mismatch"
         elif isinstance(error, ClientResponseError) and error.code in {"pairing_expired", "pairing_not_found"}:
             status = "expired"
+        elif isinstance(error, ClientResponseError) and error.code in {"pairing_rejected", "rejected"}:
+            status = "rejected"
+        elif isinstance(error, ClientResponseError) and error.code in {"pairing_cancelled", "cancelled"}:
+            status = "cancelled"
         else:
             status = "waiting"
         self._update_pending(pending_id, {"status": status, "last_error": _safe_text(error), "retry_after": getattr(error, "retry_after", None)})

@@ -54,6 +54,11 @@ The first successful request returns a high-entropy `pairing_session` handle.
 The client sends that handle on subsequent approval polls, so a new TLS
 connection does not require re-deriving the code. The handle is stored only as
 a hash on the host and expires with the pairing request.
+The requesting client may cancel its pending request with
+`POST /v1/pair/cancel`, authenticated by its private verification nonce and
+optional session handle. The host returns the terminal state idempotently, and
+owner rejection is reported to the client as `pairing_rejected` instead of an
+ambiguous missing request.
 The advanced form sends `pairing_id` and a short-lived secret from the full
 payload. The legacy host-issued `pairing_code` form remains accepted for
 compatibility. Verification nonces expire after 120 seconds and are consumed
