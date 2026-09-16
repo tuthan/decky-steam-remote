@@ -772,6 +772,115 @@ class HostTests(unittest.TestCase):
             finally:
                 service.stop()
 
+    def test_remote_display_order_routes_round_trip_through_gamescope(self):
+        with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as drm_directory, tempfile.TemporaryDirectory() as user_directory, tempfile.TemporaryDirectory() as vendor_directory:
+            drm_root = Path(drm_directory)
+            for name in ("card0-DP-1", "card0-HDMI-A-2"):
+                connector = drm_root / name
+                connector.mkdir()
+                (connector / "status").write_text("connected", encoding="ascii")
+            original_script = Path(vendor_directory) / "gamescope-session"
+            original_script.write_text("#!/usr/bin/env bash\nexec gamescope -O '*',eDP-1\n", encoding="utf-8")
+            systemctl_calls = []
+            gamescope = GamescopeOutputManager(
+                state_directory,
+                user_root=user_directory,
+                original_script=original_script,
+                gamescopectl=Path(vendor_directory) / "gamescopectl",
+                systemctl_runner=lambda arguments: systemctl_calls.append(arguments),
+            )
+            bridge = BridgeBroker()
+            bridge.report_snapshot(snapshot())
+            service = HostService(state_directory, bridge=bridge, drm_root=drm_root, gamescope=gamescope)
+            service._tls = {"ready": True, "fingerprint": "sha256:" + "a" * 64}
+            try:
+                credential = self.pair(service)
+                headers = {"Authorization": "Bearer " + credential["token"]}
+
+                status, _, payload = service.handle_http("GET", "/v1/display/order", headers)
+                self.assertEqual(status, 200)
+                order = payload["display_order"]
+                self.assertTrue(order["available"])
+                self.assertEqual(order["output_keys"], ["drm:card0:DP-1", "drm:card0:HDMI-A-2"])
+                generation = order["generation"]
+
+                body = {
+                    "request_id": "remote-order-1",
+                    "output_keys": ["drm:card0:DP-1", "drm:card0:HDMI-A-2"],
+                    "generation": generation,
+                    "restart": False,
+                }
+                status, _, first_payload = service.handle_http("POST", "/v1/display/order", headers, body)
+                first_operation = first_payload["operation"]
+                self.assertEqual(status, 202)
+                self.assertEqual(first_operation["kind"], "display.order")
+                self.assertEqual(first_operation["state"], "succeeded")
+                self.assertEqual(first_operation["target"]["output_keys"], body["output_keys"])
+                self.assertEqual(gamescope.configured_connectors(), ["DP-1", "HDMI-A-2"])
+                self.assertEqual(systemctl_calls, [["daemon-reload"]])
+
+                status, _, repeat_payload = service.handle_http("POST", "/v1/display/order", headers, body)
+                self.assertEqual(status, 202)
+                self.assertEqual(repeat_payload["operation"]["id"], first_operation["id"])
+                self.assertEqual(systemctl_calls, [["daemon-reload"]])
+
+                status, _, payload = service.handle_http("GET", "/v1/display/order", headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["display_order"]["saved_output_keys"], body["output_keys"])
+
+                restart_body = {**body, "request_id": "remote-order-restart", "restart": True}
+                status, _, restart_payload = service.handle_http("POST", "/v1/display/order", headers, restart_body)
+                self.assertEqual(status, 202)
+                self.assertEqual(restart_payload["operation"]["outcome"], "gamescope_output_configured_and_restart_requested")
+                self.assertEqual(systemctl_calls[-1], ["--no-block", "restart", "gamescope-session.target"])
+
+                reset_body = {"request_id": "remote-reset-1"}
+                status, _, reset_payload = service.handle_http("POST", "/v1/display/order/automatic", headers, reset_body)
+                self.assertEqual(status, 202)
+                self.assertEqual(reset_payload["operation"]["kind"], "display.order.reset")
+                self.assertEqual(reset_payload["operation"]["state"], "succeeded")
+                self.assertEqual(reset_payload["operation"]["outcome"], "gamescope_output_cleared")
+                self.assertEqual(gamescope.configured_connectors(), [])
+                self.assertEqual(systemctl_calls[-1], ["daemon-reload"])
+            finally:
+                service.stop()
+
+    def test_remote_display_order_reports_unsupported_hosts_as_resource(self):
+        with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as drm_directory, tempfile.TemporaryDirectory() as user_directory, tempfile.TemporaryDirectory() as vendor_directory:
+            drm_root = Path(drm_directory)
+            connector = drm_root / "card0-DP-1"
+            connector.mkdir()
+            (connector / "status").write_text("connected", encoding="ascii")
+            original_script = Path(vendor_directory) / "gamescope-session"
+            original_script.write_text("#!/usr/bin/env bash\nexec gamescope --changed-format\n", encoding="utf-8")
+            gamescope = GamescopeOutputManager(
+                state_directory,
+                user_root=user_directory,
+                original_script=original_script,
+                gamescopectl=Path(vendor_directory) / "gamescopectl",
+                systemctl_runner=lambda arguments: None,
+            )
+            bridge = BridgeBroker()
+            bridge.report_snapshot(snapshot())
+            service = HostService(state_directory, bridge=bridge, drm_root=drm_root, gamescope=gamescope)
+            service._tls = {"ready": True, "fingerprint": "sha256:" + "a" * 64}
+            try:
+                credential = self.pair(service)
+                status, _, payload = service.handle_http(
+                    "GET",
+                    "/v1/display/order",
+                    {"Authorization": "Bearer " + credential["token"]},
+                )
+                order = payload["display_order"]
+                self.assertEqual(status, 200)
+                self.assertFalse(order["available"])
+                self.assertTrue(order["unsupported"])
+                self.assertEqual(order["reason"], "This SteamOS gamescope-session format is not supported safely")
+                self.assertFalse(order["restart_available"])
+            finally:
+                service.stop()
+
+
     def test_local_display_contract_does_not_infer_active_screen(self):
         known = normalize_snapshot(local_fixture("two-screens.json"))
         self.assertEqual(resolve_active_output(known["outputs"], known["active_output_key"]), ("output:hdmi-a-1", "known"))

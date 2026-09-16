@@ -46,6 +46,7 @@
     },
     "sunshine": {"$ref": "#/$defs/sunshine"},
     "outputs": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/output"}},
+    "display_order": {"$ref": "#/$defs/display_order"},
     "operation": {"$ref": "#/$defs/operation"},
     "pairing_session": {"type": "string", "minLength": 16, "maxLength": 256}
   },
@@ -88,6 +89,64 @@
         "modes": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/mode"}},
         "generation": {"type": "integer", "minimum": 0, "maximum": 2147483647},
         "rgb_range": {"type": "integer", "enum": [0, 1, 2]}
+      },
+      "additionalProperties": false
+    },
+    "display_order_output": {
+      "type": "object",
+      "required": ["output_key", "display_name", "connector", "connected", "active"],
+      "properties": {
+        "output_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}$"},
+        "display_name": {"type": ["string", "null"], "maxLength": 256},
+        "connector": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.:-]{1,128}$"},
+        "connected": {"type": "boolean"},
+        "active": {"type": ["boolean", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "display_order": {
+      "type": "object",
+      "required": [
+        "available",
+        "generation",
+        "observed_at",
+        "output_keys",
+        "outputs",
+        "saved_output_keys",
+        "restart_required",
+        "restart_available",
+        "adapter",
+        "unsupported",
+        "stale",
+        "ambiguous",
+        "previous_reading",
+        "reason"
+      ],
+      "properties": {
+        "available": {"type": "boolean"},
+        "generation": {"type": ["integer", "null"], "minimum": 0, "maximum": 2147483647},
+        "observed_at": {"type": ["string", "null"], "maxLength": 64},
+        "output_keys": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}$"}
+        },
+        "outputs": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/display_order_output"}},
+        "saved_output_keys": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}$"}
+        },
+        "restart_required": {"type": "boolean"},
+        "restart_available": {"type": "boolean"},
+        "adapter": {"type": ["string", "null"], "maxLength": 128},
+        "unsupported": {"type": "boolean"},
+        "stale": {"type": "boolean"},
+        "ambiguous": {"type": "boolean"},
+        "previous_reading": {"type": "boolean"},
+        "reason": {"type": ["string", "null"], "maxLength": 256}
       },
       "additionalProperties": false
     },

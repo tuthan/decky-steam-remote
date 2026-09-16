@@ -373,6 +373,10 @@ class RemoteClient:
     def outputs(self) -> dict[str, Any]:
         return self.request("GET", "/v1/display/outputs")
 
+    def display_order(self) -> dict[str, Any]:
+        """Read the remote host's physical Gaming Mode output order."""
+        return self.request("GET", "/v1/display/order")
+
     def operation(self, operation_id: str) -> dict[str, Any]:
         return self.request("GET", f"/v1/operations/{operation_id}")
 

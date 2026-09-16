@@ -932,6 +932,9 @@ class HostService:
         if method == "GET" and path == "/v1/display/outputs":
             client = self._authenticate(headers, "status.read", peer_address)
             return 200, {}, self.display_outputs(client["client_id"])
+        if method == "GET" and path == "/v1/display/order":
+            client = self._authenticate(headers, "status.read", peer_address)
+            return 200, {}, self.display_order(client["client_id"])
         if method == "GET" and path.startswith("/v1/operations/"):
             client = self._authenticate(headers, None, peer_address)
             operation_id = identifier(path.rsplit("/", 1)[-1], "operation_id")
@@ -946,6 +949,10 @@ class HostService:
         client = self._authenticate(headers, self._scope_for_route(path), peer_address)
         if path == "/v1/power":
             return self._power(client, body)
+        if path == "/v1/display/order":
+            return self._display_order(client, body)
+        if path == "/v1/display/order/automatic":
+            return self._display_order_reset(client, body)
         if path == "/v1/display/preview":
             return self._display_preview(client, body)
         if path == "/v1/display/confirm":
@@ -1237,6 +1244,145 @@ class HostService:
             "profiles": public_profiles,
             "preview": self._public_preview(self.store.get("preview")),
         }
+
+    @staticmethod
+    def _public_display_order_output(output: dict[str, Any], active_output_key: str | None) -> dict[str, Any]:
+        output_key = output["output_key"]
+        display_name = next(
+            (
+                value
+                for value in (output.get("display_name"), output.get("name"), output.get("connector"))
+                if isinstance(value, str) and value
+            ),
+            None,
+        )
+        connector = output.get("connector")
+        if not isinstance(connector, str) or not connector:
+            connector = None
+        return {
+            "output_key": output_key,
+            "display_name": display_name[:256] if isinstance(display_name, str) else None,
+            "connector": connector[:128] if isinstance(connector, str) else None,
+            "connected": output.get("connected") is True,
+            "active": (
+                None
+                if output.get("connected") is not True or active_output_key is None
+                else output_key == active_output_key
+            ),
+        }
+
+    def display_order(self, client_id: str) -> dict[str, Any]:
+        """Return the fresh physical inventory and the saved Gamescope order."""
+        del client_id
+        inventory = self._drm_inventory.snapshot()
+        gamescope = self.gamescope.status()
+        if not isinstance(gamescope, dict):
+            gamescope = {}
+        supported = gamescope.get("available") is True
+
+        raw_outputs = inventory.get("outputs", []) if isinstance(inventory, dict) else []
+        outputs = [
+            output
+            for output in raw_outputs
+            if (
+                isinstance(output, dict)
+                and isinstance(output.get("output_key"), str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}", output["output_key"])
+            )
+        ]
+        connected_outputs = [output for output in outputs if output.get("connected") is True]
+        connector_counts: dict[str, int] = {}
+        invalid_connected_identity = False
+        for output in connected_outputs:
+            connector = output.get("connector")
+            if not isinstance(connector, str) or not connector:
+                invalid_connected_identity = True
+                continue
+            connector_counts[connector] = connector_counts.get(connector, 0) + 1
+        ambiguous = invalid_connected_identity or any(count > 1 for count in connector_counts.values())
+
+        active_connector = gamescope.get("active_connector")
+        active_matches = [
+            output
+            for output in connected_outputs
+            if isinstance(active_connector, str) and output.get("connector") == active_connector
+        ]
+        active_output_key = active_matches[0]["output_key"] if len(active_matches) == 1 else None
+        public_outputs = [
+            self._public_display_order_output(output, active_output_key)
+            for output in outputs
+        ]
+
+        configured_connectors = gamescope.get("configured_connectors", [])
+        if not isinstance(configured_connectors, list):
+            configured_connectors = []
+        saved_output_keys: list[str] = []
+        unavailable_connector: str | None = None
+        for connector in configured_connectors:
+            if not isinstance(connector, str):
+                continue
+            matches = [output for output in outputs if output.get("connector") == connector]
+            if len(matches) == 1:
+                selected = matches[0]
+            elif len(matches) > 1:
+                connected_matches = [output for output in matches if output.get("connected") is True]
+                if len(connected_matches) != 1:
+                    ambiguous = True
+                    if unavailable_connector is None:
+                        unavailable_connector = connector
+                    continue
+                selected = connected_matches[0]
+            else:
+                if unavailable_connector is None:
+                    unavailable_connector = connector
+                continue
+            output_key = selected["output_key"]
+            if output_key not in saved_output_keys:
+                saved_output_keys.append(output_key)
+            if selected.get("connected") is not True and unavailable_connector is None:
+                unavailable_connector = connector
+
+        if inventory is None:
+            reason = (
+                "This host does not expose remote Gaming Mode display ordering."
+                if not supported
+                else "Physical display inventory is unavailable."
+            )
+        elif not supported:
+            reason = gamescope.get("reason") or "This host does not expose remote Gaming Mode display ordering."
+        elif ambiguous:
+            reason = "A connected display connector identity is ambiguous; display ordering is unavailable."
+        elif not connected_outputs:
+            reason = "No connected display outputs are available."
+        elif unavailable_connector:
+            reason = f"The preferred {unavailable_connector} output is currently unavailable; the next connected output is used."
+        else:
+            reason = None
+
+        return {
+            "protocol_version": 1,
+            "display_order": {
+                "available": bool(inventory is not None and supported and connected_outputs and not ambiguous),
+                "generation": inventory.get("generation") if isinstance(inventory, dict) else None,
+                "observed_at": _utc_now() if inventory is not None else None,
+                "output_keys": [output["output_key"] for output in public_outputs],
+                "outputs": public_outputs,
+                "saved_output_keys": saved_output_keys,
+                "restart_required": bool(supported and gamescope.get("requires_restart") is True),
+                "restart_available": bool(supported and gamescope.get("restart_available") is True),
+                "adapter": (
+                    gamescope.get("adapter")[:128]
+                    if supported and isinstance(gamescope.get("adapter"), str)
+                    else None
+                ),
+                "unsupported": not supported,
+                "stale": False,
+                "ambiguous": ambiguous,
+                "previous_reading": False,
+                "reason": reason[:256] if isinstance(reason, str) else None,
+            },
+        }
+
 
     # ---- local Gaming Mode display selection -------------------------
 
@@ -1939,6 +2085,123 @@ class HostService:
         self.store.mutate(lambda state: state.__setitem__("local_display_preview", None) if state.get("local_display_preview", {}).get("preview_id") == preview_id else None)
 
     # ---- operations ----------------------------------------------------
+
+    def _display_order_target(self, output_keys: Any, generation: Any, restart: Any) -> dict[str, Any]:
+        if not isinstance(output_keys, list) or not 1 <= len(output_keys) <= 16:
+            raise ApiError("output order must contain 1 to 16 screens", 400, "invalid_display_target")
+        if type(restart) is not bool:
+            raise ApiError("restart must be a boolean", 400, "invalid_request")
+        generation = self._local_generation(generation)
+        validated_keys = [self._local_output_key(value) for value in output_keys]
+        if len(set(validated_keys)) != len(validated_keys):
+            raise ApiError("output order contains duplicate screens", 400, "invalid_display_target")
+
+        capability = self._local_gamescope_output_capability()
+        if not capability["available"]:
+            raise ApiError(capability["reason"], 409, "gamescope_output_unsupported")
+        inventory = self._drm_inventory.snapshot()
+        if inventory is None:
+            raise ApiError("the screen inventory is unavailable", 409, "stale_display_target")
+        if inventory.get("generation") != generation:
+            raise ApiError("display inventory changed; refresh the order", 409, "stale_display_inventory")
+
+        connected_outputs = [
+            output
+            for output in inventory.get("outputs", [])
+            if isinstance(output, dict) and output.get("connected") is True
+        ]
+        connectors: list[str] = []
+        for output_key in validated_keys:
+            target = self._local_find_output(inventory, output_key)
+            if target is None or target.get("connected") is not True:
+                raise ApiError("a selected screen is no longer connected", 409, "stale_display_target")
+            connector = target.get("connector")
+            if not isinstance(connector, str):
+                raise ApiError("a selected screen has no usable connector", 409, "invalid_display_target")
+            if sum(1 for output in connected_outputs if output.get("connector") == connector) != 1:
+                raise ApiError("a selected connector identity is ambiguous", 409, "ambiguous_display_identity")
+            connectors.append(connector)
+        if len(set(connectors)) != len(connectors):
+            raise ApiError("output order contains duplicate connectors", 409, "ambiguous_display_identity")
+        return {
+            "output_keys": validated_keys,
+            "connectors": connectors,
+            "generation": generation,
+            "restart": restart,
+        }
+
+    def _display_order(self, client: dict[str, Any], body: dict[str, Any]) -> tuple[int, dict[str, str], dict[str, Any]]:
+        existing = self.journal.lookup(client["client_id"], request_id(body), body)
+        if existing is not None:
+            return 202, {}, {"protocol_version": 1, "operation": existing}
+        with self._mutation_lock:
+            existing = self.journal.lookup(client["client_id"], request_id(body), body)
+            if existing is not None:
+                return 202, {}, {"protocol_version": 1, "operation": existing}
+            self._reject_if_conflicting("display_preference")
+            target = self._display_order_target(body["output_keys"], body["generation"], body["restart"])
+            created, operation = self.journal.begin(client["client_id"], request_id(body), "display.order", body)
+            if not created:
+                return 202, {}, {"protocol_version": 1, "operation": operation}
+            operation = self.journal.update(operation["id"], target=target)
+            try:
+                result = self.gamescope.apply_order(target["connectors"])
+            except GamescopeError as exc:
+                self.journal.update(operation["id"], state="failed", reason=str(exc)[:256])
+                raise ApiError(str(exc), 409, "gamescope_output_update_failed") from exc
+
+            if target["restart"]:
+                try:
+                    restart_result = self.gamescope.restart_session()
+                except GamescopeError as exc:
+                    reason = f"Output order was saved, but Gaming Mode could not restart: {exc}"
+                    operation = self.journal.update(
+                        operation["id"],
+                        state="failed",
+                        outcome="gamescope_output_configured_restart_failed",
+                        reason=reason[:256],
+                    )
+                    return 202, {}, {"protocol_version": 1, "operation": operation}
+                result = {**result, "restart": restart_result}
+
+            operation = self.journal.update(
+                operation["id"],
+                state="succeeded",
+                outcome="gamescope_output_configured_and_restart_requested" if target["restart"] else "gamescope_output_configured",
+                reason=(
+                    "Output order saved; Gaming Mode restart requested."
+                    if target["restart"]
+                    else "Output order saved for the next Gaming Mode session."
+                ),
+            )
+            return 202, {}, {"protocol_version": 1, "operation": operation}
+
+    def _display_order_reset(self, client: dict[str, Any], body: dict[str, Any]) -> tuple[int, dict[str, str], dict[str, Any]]:
+        existing = self.journal.lookup(client["client_id"], request_id(body), body)
+        if existing is not None:
+            return 202, {}, {"protocol_version": 1, "operation": existing}
+        with self._mutation_lock:
+            existing = self.journal.lookup(client["client_id"], request_id(body), body)
+            if existing is not None:
+                return 202, {}, {"protocol_version": 1, "operation": existing}
+            self._reject_if_conflicting("display_preference")
+            created, operation = self.journal.begin(client["client_id"], request_id(body), "display.order.reset", body)
+            if not created:
+                return 202, {}, {"protocol_version": 1, "operation": operation}
+            operation = self.journal.update(operation["id"], target={"automatic": True})
+            try:
+                self.gamescope.clear()
+            except GamescopeError as exc:
+                self.journal.update(operation["id"], state="failed", reason=str(exc)[:256])
+                raise ApiError(str(exc), 409, "gamescope_output_update_failed") from exc
+            operation = self.journal.update(
+                operation["id"],
+                state="succeeded",
+                outcome="gamescope_output_cleared",
+                reason="Automatic display order restored for the next Gaming Mode session.",
+            )
+            return 202, {}, {"protocol_version": 1, "operation": operation}
+
 
     def _power(self, client: dict[str, Any], body: dict[str, Any]) -> tuple[int, dict[str, str], dict[str, Any]]:
         action = body["action"]

@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -43,6 +44,8 @@ DEFAULT_CLIENT_SCOPES = ["status.read", "power.control", "display.control"]
 MAX_CLIENT_NAME = 96
 MAX_ACTIONS = 64
 MAX_DISCOVERY_SCANS = 8
+MAX_DISPLAY_ORDER_KEYS = 16
+_DISPLAY_ORDER_OUTPUT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}$")
 
 
 def _utc_now() -> str:
@@ -72,6 +75,38 @@ def default_client_name() -> str:
 
 def _copy(value: Any) -> Any:
     return copy.deepcopy(value)
+
+
+def _display_order_keys(value: Any) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_DISPLAY_ORDER_KEYS:
+        raise ClientError("display order must contain 1 to 16 screens", "invalid_display_order")
+    keys: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not _DISPLAY_ORDER_OUTPUT_KEY_RE.fullmatch(item):
+            raise ClientError("display order contains an invalid screen", "invalid_display_order")
+        keys.append(item)
+    if len(set(keys)) != len(keys):
+        raise ClientError("display order contains duplicate screens", "invalid_display_order")
+    return keys
+
+
+def _unsupported_display_order(reason: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "generation": None,
+        "observed_at": None,
+        "output_keys": [],
+        "outputs": [],
+        "saved_output_keys": [],
+        "restart_required": False,
+        "restart_available": False,
+        "adapter": None,
+        "unsupported": True,
+        "stale": False,
+        "ambiguous": False,
+        "previous_reading": False,
+        "reason": _safe_text(reason),
+    }
 
 
 def _future_error(error: BaseException) -> concurrent.futures.Future:
@@ -398,7 +433,7 @@ class ClientService:
             key: _copy(value.get(key))
             for key in (
                 "host_id", "endpoint", "certificate_fingerprint", "name", "scopes", "last_connected_at",
-                "last_checked_at", "last_error", "retry_after", "status", "outputs", "profiles", "preview", "wake_target",
+                "last_checked_at", "last_error", "retry_after", "status", "outputs", "display_order", "profiles", "preview", "wake_target",
                 "wake", "alias",
             )
             if key in value
@@ -839,20 +874,83 @@ class ClientService:
 
     get_remote_outputs = read_outputs
 
+    def read_display_order(self) -> dict[str, Any]:
+        """Read the remote Gaming Mode order without breaking older hosts."""
+        remote = self._state().get("remote")
+        if not isinstance(remote, dict):
+            raise ClientError("Pair a remote device first", "not_paired")
+        key = ("display-order", remote.get("host_id"), remote.get("endpoint"))
+        future = self._work_queue().submit_read(key, lambda: self._core(remote).display_order())
+        try:
+            value = future.result(timeout=REQUEST_TIMEOUT + 3)
+        except ClientResponseError as exc:
+            # Display ordering is additive to v1. A paired host from before
+            # this route existed should remain fully usable for its other
+            # controls; represent the missing capability as a resource state.
+            if exc.status == 404 or exc.code == "not_found":
+                value = {
+                    "protocol_version": 1,
+                    "display_order": _unsupported_display_order(
+                        "This remote device does not expose Gaming Mode display ordering."
+                    ),
+                }
+            else:
+                self._update_remote(remote, {
+                    "last_error": _safe_text(exc),
+                    "retry_after": exc.retry_after,
+                    "last_checked_at": _utc_now(),
+                })
+                raise
+        except Exception as exc:
+            error = exc if isinstance(exc, ClientError) else ClientError("Can't reach the remote device", "network_error")
+            self._update_remote(remote, {
+                "last_error": _safe_text(error),
+                "retry_after": getattr(error, "retry_after", None),
+                "last_checked_at": _utc_now(),
+            })
+            raise error
+        if not isinstance(value, dict) or not isinstance(value.get("display_order"), dict):
+            raise ClientError("the device returned invalid display-order data", "invalid_response")
+        self._update_remote(remote, {"display_order": value["display_order"]})
+        return value
+
+    get_remote_display_order = read_display_order
+
     def refresh_remote(self) -> dict[str, Any]:
         status = self.read_status()
         try:
             outputs = self.read_outputs()
         except ClientError:
             outputs = None
+        try:
+            display_order = self.read_display_order()
+        except ClientError:
+            display_order = None
         self.reconcile_operations()
-        return {"status": status, "outputs": outputs, "remote": self._public_remote(self.store.get("remote"))}
+        return {
+            "status": status,
+            "outputs": outputs,
+            "display_order": display_order,
+            "remote": self._public_remote(self.store.get("remote")),
+        }
 
     # ---- availability and actions ------------------------------------
 
-    def action_availability(self, action: str, *, output_id: str | None = None, mode_id: str | None = None, preview_id: str | None = None) -> dict[str, Any]:
+    def action_availability(
+        self,
+        action: str,
+        *,
+        output_id: str | None = None,
+        mode_id: str | None = None,
+        preview_id: str | None = None,
+        output_keys: list[str] | None = None,
+        generation: int | None = None,
+    ) -> dict[str, Any]:
         action = _safe_text(action, 64)
-        if action not in {"suspend", "restart", "shutdown", "preview", "confirm", "restore", "restore_preview", "save_current", "sunshine_restart"}:
+        if action not in {
+            "suspend", "restart", "shutdown", "preview", "confirm", "restore", "restore_preview",
+            "save_current", "sunshine_restart", "display_order", "display_order_reset",
+        }:
             return {"available": False, "reason": "This action is unsupported"}
         state = self._state()
         remote = state.get("remote")
@@ -866,6 +964,29 @@ class ClientService:
                 return {"available": False, "reason": f"This pairing cannot {action} the remote device"}
         if action == "sunshine_restart" and capabilities.get("sunshine_restart") != "available":
             return {"available": False, "reason": "Sunshine recovery is unavailable on the remote device"}
+        if action in {"display_order", "display_order_reset"}:
+            if "display.control" not in set(remote.get("scopes", [])):
+                return {"available": False, "reason": "This pairing cannot change the remote display order"}
+            order = remote.get("display_order") if isinstance(remote.get("display_order"), dict) else None
+            if order is None:
+                return {"available": False, "reason": "Refresh the remote display order first"}
+            if order.get("unsupported") is True:
+                return {"available": False, "reason": order.get("reason") or "Gaming Mode display ordering is unsupported on the remote device"}
+            if action != "display_order_reset":
+                if order.get("available") is not True:
+                    return {"available": False, "reason": order.get("reason") or "Gaming Mode display ordering is unavailable on the remote device"}
+                try:
+                    keys = _display_order_keys(output_keys)
+                except ClientError as exc:
+                    return {"available": False, "reason": str(exc)}
+                if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0 or generation > 2_147_483_647:
+                    return {"available": False, "reason": "The remote display inventory is stale; refresh it before saving"}
+                if order.get("generation") != generation:
+                    return {"available": False, "reason": "The remote display inventory changed; refresh the order"}
+                outputs = order.get("outputs") if isinstance(order.get("outputs"), list) else []
+                by_key = {item.get("output_key"): item for item in outputs if isinstance(item, dict)}
+                if any(by_key.get(key, {}).get("connected") is not True for key in keys):
+                    return {"available": False, "reason": "A selected remote screen is no longer connected"}
         if action in {"preview", "confirm", "restore", "restore_preview", "save_current"} and capabilities.get("display_rescue") != "available":
             return {"available": False, "reason": "Steam display controls are unavailable on the remote device"}
         if action == "restore" and not (remote.get("profiles") or status.get("recovery_profile")):
@@ -1051,6 +1172,29 @@ class ClientService:
         if not available["available"]:
             raise ClientError(available["reason"], "action_unavailable")
         return self._action("save_current", "/v1/display/save-current", {"output_id": identifier(output_id, "output_id"), "generation": generation, "visible": True})
+
+    def save_display_order(self, output_keys: Any, generation: Any, *, restart: bool = False) -> dict[str, Any]:
+        """Save the remote host's ordered Gamescope output preference."""
+        keys = _display_order_keys(output_keys)
+        if not isinstance(generation, int) or isinstance(generation, bool) or not 0 <= generation <= 2_147_483_647:
+            raise ClientError("display order generation is invalid", "invalid_display_order")
+        if type(restart) is not bool:
+            raise ClientError("display order restart must be boolean", "invalid_display_order")
+        available = self.action_availability("display_order", output_keys=keys, generation=generation)
+        if not available["available"]:
+            raise ClientError(available["reason"], "action_unavailable")
+        return self._action(
+            "display_order",
+            "/v1/display/order",
+            {"output_keys": keys, "generation": generation, "restart": restart},
+        )
+
+    def reset_display_order(self) -> dict[str, Any]:
+        """Remove only the remote host's plugin-owned output preference."""
+        available = self.action_availability("display_order_reset")
+        if not available["available"]:
+            raise ClientError(available["reason"], "action_unavailable")
+        return self._action("display_order_reset", "/v1/display/order/automatic", {})
 
     def sunshine_restart(self) -> dict[str, Any]:
         available = self.action_availability("sunshine_restart")

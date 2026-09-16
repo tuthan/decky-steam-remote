@@ -344,6 +344,14 @@ class DeviceCoordinator:
             raise CoordinatorError("Client mode is not enabled", "client_role_required")
         return self.client
 
+    def _require_local_display(self) -> HostService:
+        """Return the local display service in any configured device role."""
+        if self.host is None:
+            raise CoordinatorError(self._recovery_error or "host state is unavailable", "state_recovery_required")
+        if self._role_mode() not in MODES:
+            raise CoordinatorError("Choose a device mode before changing local displays", "device_mode_required")
+        return self.host
+
     def update_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(changes, dict):
             raise CoordinatorError("settings must be an object", "invalid_request")
@@ -443,6 +451,18 @@ class DeviceCoordinator:
     def local_sunshine_restart(self) -> dict[str, Any]:
         return self._require_server().local_sunshine_restart()
 
+    # Local Gaming Mode output ordering is available even in Client mode. It
+    # operates on this handheld's DRM/Gamescope state and never targets the
+    # paired remote device.
+    def local_display_order(self) -> dict[str, Any]:
+        return self._require_local_display().display_order("decky-local")
+
+    def local_display_order_save(self, output_keys: list[str], generation: int, restart: bool = False) -> dict[str, Any]:
+        return self._require_local_display().local_gamescope_outputs(output_keys, generation, restart)
+
+    def local_display_order_reset(self) -> dict[str, Any]:
+        return self._require_local_display().local_clear_gamescope_output()
+
     # Client-side RPCs.
     def discover_remote_devices(self, port: int = 18443, endpoints: list[str] | None = None) -> list[dict[str, Any]]:
         return self._require_client().discover(port=port, endpoints=endpoints)
@@ -477,8 +497,30 @@ class DeviceCoordinator:
     def remote_outputs(self) -> dict[str, Any]:
         return self._require_client().read_outputs()
 
-    def remote_action_availability(self, action: str, output_id: str | None = None, mode_id: str | None = None) -> dict[str, Any]:
-        return self._require_client().action_availability(action, output_id=output_id, mode_id=mode_id)
+    def remote_display_order(self) -> dict[str, Any]:
+        return self._require_client().read_display_order()
+
+    def remote_display_order_save(self, output_keys: list[str], generation: int, restart: bool = False) -> dict[str, Any]:
+        return self._require_client().save_display_order(output_keys, generation, restart=restart)
+
+    def remote_display_order_reset(self) -> dict[str, Any]:
+        return self._require_client().reset_display_order()
+
+    def remote_action_availability(
+        self,
+        action: str,
+        output_id: str | None = None,
+        mode_id: str | None = None,
+        output_keys: list[str] | None = None,
+        generation: int | None = None,
+    ) -> dict[str, Any]:
+        return self._require_client().action_availability(
+            action,
+            output_id=output_id,
+            mode_id=mode_id,
+            output_keys=output_keys,
+            generation=generation,
+        )
 
     def remote_power(self, action: str) -> dict[str, Any]:
         return self._require_client().power(action)

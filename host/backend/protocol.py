@@ -23,6 +23,8 @@ MUTATING_ROUTES = frozenset({
     "/v1/display/confirm",
     "/v1/display/restore",
     "/v1/display/save-current",
+    "/v1/display/order",
+    "/v1/display/order/automatic",
     "/v1/sunshine/restart",
     "/v1/pair/revoke-self",
 })
@@ -30,6 +32,7 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,253}$")
 _MAC_RE = re.compile(r"^[0-9A-Fa-f]{12}$")
 _PAIRING_CODE_RE = re.compile(r"^[0-9]{8}$")
+_DISPLAY_ORDER_OUTPUT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:|/-]{0,127}$")
 PAIRING_SESSION_MIN_LENGTH = 16
 PAIRING_SESSION_MAX_LENGTH = 256
 
@@ -112,6 +115,25 @@ def request_id(body: dict[str, Any]) -> str:
     return identifier(body.get("request_id"), "request_id")
 
 
+def _display_order_output_keys(value: Any) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 16:
+        raise ProtocolError("display order must contain 1 to 16 output keys")
+    keys: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not _DISPLAY_ORDER_OUTPUT_KEY_RE.fullmatch(item):
+            raise ProtocolError("display order contains an invalid output key")
+        keys.append(item)
+    if len(set(keys)) != len(keys):
+        raise ProtocolError("display order contains duplicate output keys")
+    return keys
+
+
+def _display_order_generation(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 2_147_483_647:
+        raise ProtocolError("display order generation is invalid")
+    return value
+
+
 def canonical_digest(body: Any) -> str:
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
     if len(encoded) > MAX_JSON_BYTES:
@@ -172,6 +194,20 @@ def validate_route_body(method: str, path: str, body: dict[str, Any] | None) -> 
         action = body.get("action")
         if action not in {"suspend", "restart", "shutdown"}:
             raise ProtocolError("action is unsupported")
+        return body
+    if path == "/v1/display/order":
+        if set(body) != {"request_id", "output_keys", "generation", "restart"}:
+            raise ProtocolError("display order accepts only request_id, output_keys, generation, and restart")
+        request_id(body)
+        _display_order_output_keys(body.get("output_keys"))
+        _display_order_generation(body.get("generation"))
+        if type(body.get("restart")) is not bool:
+            raise ProtocolError("restart must be a boolean")
+        return body
+    if path == "/v1/display/order/automatic":
+        if set(body) != {"request_id"}:
+            raise ProtocolError("automatic display-order reset accepts only request_id")
+        request_id(body)
         return body
     if path in {"/v1/display/preview", "/v1/display/confirm", "/v1/display/restore", "/v1/display/save-current"}:
         request_id(body)

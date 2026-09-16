@@ -122,6 +122,10 @@ function readVarint(bytes, start) {
   assert.match(source, /Save for next session/, "the display-order UI must offer a non-disruptive save");
   assert.match(source, /Save and restart Gaming Mode/, "the display-order UI must offer a confirmed apply path");
   assert.match(source, /Move up/, "the display order must be controller-reorderable");
+  assert.match(source, /remote_display_order_save:\s*\["output_keys", "generation", "restart"\]/, "remote display order must use a fixed backend contract");
+  assert.match(source, /local-display-order/, "Client mode must expose a local-only display-order destination");
+  assert.match(source, /Changes the remote device only/, "remote display-order UI must identify its target");
+  assert.match(source, /paired remote device will not be affected/, "local display-order UI must identify its target");
   const realSetTimeout = setTimeout;
   const fastSetTimeout = (callback, milliseconds, ...args) => realSetTimeout(callback, Math.min(milliseconds, 8), ...args);
   const factory = vm.runInNewContext(source, {

@@ -12,7 +12,9 @@ with or endorsed by Valve Corporation.
 
 ## Preview
 
-![SteamOS Companion Decky host preview](assets/preview.png)
+![SteamOS Companion This device view](assets/main.png)
+
+![SteamOS Companion Gaming Mode display order](assets/display-order.png)
 
 ## Install
 
@@ -48,7 +50,7 @@ ssh deck@steamdeck.local 'bash -s' < install.sh
 To install a specific release:
 
 ```sh
-ssh deck@steamdeck.local 'bash -s -- v0.5.13' < install.sh
+ssh deck@steamdeck.local 'bash -s -- v0.5.14' < install.sh
 ```
 
 The installer copies the plugin to `~/homebrew/plugins/steamos-companion` and
@@ -59,16 +61,17 @@ is unavailable, use Decky’s **Reload Plugins** action.
 The installer can also be run directly on the Deck:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuthan/steamos-companion-decky/main/install.sh | bash -s -- v0.5.13
+curl -fsSL https://raw.githubusercontent.com/tuthan/steamos-companion-decky/main/install.sh | bash -s -- v0.5.14
 ```
 
 ## Device modes
 
 On first launch, choose the role that matches the device:
 
-- **Client** controls one saved remote device. Discovery is an explicit,
-  bounded local-network scan; manual HTTPS entry is available when discovery
-  is not suitable. Display settings show common resolutions and refresh rates
+- **Client** controls one saved remote device and can configure this device's
+  Gaming Mode display order locally. Discovery is an explicit, bounded
+  local-network scan; manual HTTPS entry is available when discovery is not
+  suitable. Remote display settings show common resolutions and refresh rates
   by default; Settings has an opt-in toggle for uncommon modes.
 - **Server** accepts authenticated requests from paired clients and keeps the
   Decky display bridge alive while the settings panel is closed.
@@ -100,11 +103,13 @@ Client mode is added. Pending display recovery is allowed to finish (or can be
 cancelled from Settings) before the Server role is stopped. A saved outgoing
 pairing and unresolved operation journal survive Client mode being disabled.
 
-The Client destination has Remote, Display settings, Power options, and
-Connection details flows. Display previews always offer Revert first, power
+The Client UI keeps **Remote device** and **This device** as separate
+destinations. Remote device contains paired-device status, display resolution
+settings, Gaming Mode display order, power, and connection details. This device
+contains the local Gaming Mode display order; saving or restarting it never
+targets the paired device. Display previews always offer Revert first, power
 actions require a confirmation, and an ambiguous mutation is never replayed
-automatically; the user must acknowledge an explicit resend. Remote Gaming
-Mode connector ordering is not yet exposed in Client mode.
+automatically; the user must acknowledge an explicit resend.
 
 ## Pairing
 
@@ -148,8 +153,8 @@ Update the version in `host/package.json`, commit the change, and push a
 matching tag:
 
 ```sh
-git tag v0.5.13
-git push origin v0.5.13
+git tag v0.5.14
+git push origin v0.5.14
 ```
 
 The `Release` workflow runs the checks, builds the ZIP and SHA256 file, and

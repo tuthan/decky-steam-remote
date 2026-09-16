@@ -129,6 +129,9 @@
     local_gamescope_outputs: ["output_keys", "generation", "restart"],
     local_clear_gamescope_output: [],
     local_gamescope_restart: [],
+    local_display_order: [],
+    local_display_order_save: ["output_keys", "generation", "restart"],
+    local_display_order_reset: [],
     // Keep these names while an older panel instance is still in memory.
     local_preferred_monitor: ["output_key"],
     local_clear_preferred_monitor: [],
@@ -144,7 +147,10 @@
     use_staged_remote: ["use"],
     remote_status: [],
     remote_outputs: [],
-    remote_action_availability: ["action", "output_id", "mode_id"],
+    remote_display_order: [],
+    remote_display_order_save: ["output_keys", "generation", "restart"],
+    remote_display_order_reset: [],
+    remote_action_availability: ["action", "output_id", "mode_id", "output_keys", "generation"],
     remote_power: ["action"],
     remote_preview: ["output_id", "mode_id", "generation"],
     remote_confirm_preview: ["preview_id", "visible"],
@@ -1103,7 +1109,13 @@
       try {
         const value = await callBackend("get_settings");
         setSunshineMonitoring(value?.settings?.monitor_sunshine === true);
-        setSettings(value);
+        setSettings(previous => ({
+          ...value,
+          // Local display order is an additive resource fetched only when
+          // its page is opened. Keep it across the global settings poll so
+          // the local-only page does not briefly lose its inventory.
+          ...(previous?.local_display_order ? {local_display_order: previous.local_display_order} : {}),
+        }));
         if (!draftDirtyRef.current) {
           setAddress(value?.settings?.listen_address || "0.0.0.0");
           setPort(value?.settings?.listen_port || 18443);
@@ -1476,6 +1488,7 @@
     const [selectedModeId, setSelectedModeId] = React.useState("");
     const [selectedLocalOutputKey, setSelectedLocalOutputKey] = React.useState("");
     const [localOutputOrder, setLocalOutputOrder] = React.useState([]);
+    const [remoteOutputOrder, setRemoteOutputOrder] = React.useState([]);
     const [modal, setModal] = React.useState(null);
     const viewRef = useRef("loading");
     const scanRef = useRef(null);
@@ -1484,6 +1497,8 @@
     const modeDraftTouchedRef = useRef(false);
     const modeDraftInitializedRef = useRef(false);
     const localOutputOrderTouchedRef = useRef(false);
+    const localDisplayOrderTouchedRef = useRef(false);
+    const remoteOutputOrderTouchedRef = useRef(false);
 
     function navigate(next) {
       viewRef.current = next;
@@ -1537,6 +1552,17 @@
       });
     }
 
+    function displayOrderKeys(value) {
+      const order = value?.display_order || {};
+      const outputs = Array.isArray(order.outputs) ? order.outputs : [];
+      const byKey = new Map(outputs.filter(item => item && item.output_key).map(item => [item.output_key, item]));
+      const inventoryKeys = Array.isArray(order.output_keys) ? order.output_keys : outputs.map(item => item.output_key);
+      const connected = inventoryKeys.map(key => byKey.get(key)).filter(item => item?.connected === true).map(item => item.output_key);
+      const saved = Array.isArray(order.saved_output_keys) ? order.saved_output_keys.filter(key => byKey.get(key)?.connected === true) : [];
+      const uniqueSaved = [...new Set(saved)];
+      return [...uniqueSaved, ...connected.filter(key => !uniqueSaved.includes(key))];
+    }
+
     async function run(method, args = {}, success = "") {
       if (busy) return null;
       setBusy(method);
@@ -1547,6 +1573,9 @@
         await loadSettings();
         if (method.startsWith("local_display") || method.startsWith("local_gamescope") || method.startsWith("local_preferred")) {
           await loadLocalDisplay();
+        }
+        if (method.startsWith("local_display_order")) {
+          await loadLocalDisplayOrder();
         }
         return value;
       } catch (error) {
@@ -1570,6 +1599,32 @@
           const remainingKeys = connected.map(output => output.output_key).filter(key => !configuredKeys.includes(key));
           setLocalOutputOrder([...configuredKeys, ...remainingKeys]);
         }
+        return value;
+      } catch (error) {
+        setMessage(boundedString(error));
+        return null;
+      }
+    }
+
+    async function loadLocalDisplayOrder() {
+      const currentMode = settings?.mode?.effective ?? settings?.device_mode;
+      if (!roleHasClient(currentMode) && !roleHasServer(currentMode)) return null;
+      try {
+        const value = await callBackend("local_display_order");
+        setSettings(previous => previous ? {...previous, local_display_order: value} : previous);
+        if (!localDisplayOrderTouchedRef.current) setLocalOutputOrder(displayOrderKeys(value));
+        return value;
+      } catch (error) {
+        setMessage(boundedString(error));
+        return null;
+      }
+    }
+
+    async function loadRemoteDisplayOrder() {
+      try {
+        const value = await callBackend("remote_display_order");
+        updateRemote({display_order: value?.display_order || null});
+        if (!remoteOutputOrderTouchedRef.current) setRemoteOutputOrder(displayOrderKeys(value));
         return value;
       } catch (error) {
         setMessage(boundedString(error));
@@ -1604,8 +1659,9 @@
     const mode = settings?.mode?.effective ?? settings?.device_mode;
     const client = settings?.client || {};
     const remote = client.remote;
-    const remoteVisible = roleHasClient(mode) && Boolean(remote) && ["remote", "display", "power", "details"].includes(view);
+    const remoteVisible = roleHasClient(mode) && Boolean(remote) && ["remote", "display", "remote-display-order", "power", "details"].includes(view);
     const localVisible = roleHasServer(mode) && view === "local-display";
+    const localDisplayOrderVisible = (roleHasClient(mode) || roleHasServer(mode)) && view === "local-display-order";
 
     React.useEffect(() => {
       if (localVisible) {
@@ -1613,6 +1669,20 @@
         void loadLocalDisplay();
       }
     }, [localVisible]);
+
+    React.useEffect(() => {
+      if (!localDisplayOrderVisible) return undefined;
+      localDisplayOrderTouchedRef.current = false;
+      void loadLocalDisplayOrder();
+      const timer = setInterval(() => { void loadLocalDisplayOrder(); }, 2000);
+      return () => clearInterval(timer);
+    }, [localDisplayOrderVisible]);
+
+    React.useEffect(() => {
+      if (view !== "remote-display-order") return;
+      remoteOutputOrderTouchedRef.current = false;
+      setRemoteOutputOrder([]);
+    }, [view, remote?.host_id, remote?.endpoint]);
 
     React.useEffect(() => {
       if (!remoteVisible) return undefined;
@@ -1636,6 +1706,11 @@
             // while the preview countdown remains outside inventory identity.
             const outputs = await callBackend("remote_outputs").catch(() => null);
             if (!disposed && outputs) updateRemote({outputs: outputs.outputs || [], profiles: outputs.profiles || [], preview: outputs.preview || null});
+            const displayOrder = await callBackend("remote_display_order").catch(() => null);
+            if (!disposed && displayOrder) {
+              updateRemote({display_order: displayOrder.display_order || null});
+              if (!remoteOutputOrderTouchedRef.current) setRemoteOutputOrder(displayOrderKeys(displayOrder));
+            }
             const action = value?.last_action;
             if (!disposed && action?.id && ["accepted", "dispatched", "unknown"].includes(action.state)) {
               await callBackend("check_remote_operation", {action_id: action.id}).catch(() => null);
@@ -1716,12 +1791,19 @@
 
     function header() {
       const destinations = [
-        ...(roleHasClient(mode) ? [{id: "remote", label: "Remote"}] : []),
-        ...(roleHasServer(mode) ? [{id: "this-device", label: "This device"}] : []),
+        ...(roleHasClient(mode) ? [{id: "remote", label: "Remote device"}] : []),
+        ...((roleHasClient(mode) || roleHasServer(mode)) ? [{id: "this-device", label: "This device"}] : []),
         ...(settings?.setup_complete ? [{id: "settings", label: "Settings"}] : []),
       ];
       return React.createElement(React.Fragment || "div", null,
-        React.createElement("h2", {style: {color: UI_COLORS.text}}, view === "remote" ? "Remote device" : view === "this-device" ? "This device" : view === "local-display" ? "Active screen" : "SteamOS Companion"),
+        React.createElement("h2", {style: {color: UI_COLORS.text}},
+          view === "remote" ? "Remote device"
+            : view === "remote-display-order" ? "Remote device · Display order"
+              : view === "this-device" ? "This device"
+                : view === "local-display-order" ? "This device · Display order"
+                  : view === "local-display" ? "This device · Display settings"
+                    : view === "display" ? "Remote device · Display settings"
+                      : "SteamOS Companion"),
         React.createElement("nav", {"aria-label": "Destinations", style: {display: "flex", gap: "6px", flexWrap: "wrap", color: UI_COLORS.text}},
           destinations.map(item => React.createElement(Button, {key: item.id, label: item.label, focusKey: `destination.${item.id}`, onClick: () => navigate(item.id)}))
         )
@@ -1732,9 +1814,9 @@
       const canName = draftMode === "client" || draftMode === "both";
       return React.createElement(PanelSection, {title: "Choose device mode"},
         React.createElement(PanelSectionRow, {focusKey: "setup.title"}, React.createElement(Text, null, "How will you use this device?")),
-        React.createElement(PanelSectionRow, {focusKey: "setup.client"}, React.createElement(SelectableRow, {selected: draftMode === "client", title: "Client", description: "Control another SteamOS device. Recommended", onClick: () => setDraftMode("client"), focusKey: "setup.client", autoFocus: true})),
+        React.createElement(PanelSectionRow, {focusKey: "setup.client"}, React.createElement(SelectableRow, {selected: draftMode === "client", title: "Client", description: "Control another device; arrange this handheld's Gaming Mode screen locally. Recommended", onClick: () => setDraftMode("client"), focusKey: "setup.client", autoFocus: true})),
         React.createElement(PanelSectionRow, {focusKey: "setup.server"}, React.createElement(SelectableRow, {selected: draftMode === "server", title: "Server", description: "Allow paired devices to control this device.", onClick: () => setDraftMode("server"), focusKey: "setup.server"})),
-        React.createElement(PanelSectionRow, {focusKey: "setup.both"}, React.createElement(SelectableRow, {selected: draftMode === "both", title: "Both", description: "Control another device and allow control of this device.", onClick: () => setDraftMode("both"), focusKey: "setup.both"})),
+        React.createElement(PanelSectionRow, {focusKey: "setup.both"}, React.createElement(SelectableRow, {selected: draftMode === "both", title: "Both", description: "Control another device, arrange this screen locally, and allow control of this device.", onClick: () => setDraftMode("both"), focusKey: "setup.both"})),
         canName && React.createElement(PanelSectionRow, {focusKey: "setup.client-name"}, React.createElement(Field, {label: "Name shown when pairing", value: draftName, onChange: event => setDraftName(event.target.value), placeholder: initialName, focusKey: "setup.client-name"})),
         React.createElement(PanelSectionRow, {focusKey: "setup.save"}, React.createElement(Button, {label: "Save mode", onClick: async () => {
           const value = await run("update_settings", {changes: {device_mode: draftMode, client_name: draftName}}, "Changing mode…");
@@ -1848,7 +1930,8 @@
         renderActionSummary(),
         React.createElement(PanelSectionRow, {focusKey: "remote.restore"}, profile ? React.createElement(Text, null, `Saved: ${modeLabel(profile.mode)}`) : React.createElement(Text, null, "No recovery mode saved"), React.createElement(Button, {label: "Restore saved display", disabled: !profile || Boolean(busy), onClick: async () => {if (await ensureAvailable("restore")) void run("remote_restore", {source: "verified", profile_id: profile?.id}, "Restore requested");}, focusKey: "remote.restore"})),
         React.createElement(PanelSectionRow, {focusKey: "remote.wake"}, React.createElement(Button, {label: "Wake device", disabled: Boolean(busy), onClick: () => void run("wake_remote", {}, "Wake packet sent · Waiting for connection…"), focusKey: "remote.wake"})),
-        React.createElement(PanelSectionRow, {focusKey: "remote.display"}, React.createElement(Button, {label: "Display settings  >", onClick: () => navigate("display"), focusKey: "remote.display"})),
+        React.createElement(PanelSectionRow, {focusKey: "remote.display"}, React.createElement(Button, {label: "Display settings (resolution)  >", onClick: () => navigate("display"), focusKey: "remote.display"})),
+        React.createElement(PanelSectionRow, {focusKey: "remote.display-order"}, React.createElement(Button, {label: "Gaming Mode display order  >", onClick: () => navigate("remote-display-order"), focusKey: "remote.display-order"})),
         React.createElement(PanelSectionRow, {focusKey: "remote.power"}, React.createElement(Button, {label: "Power options  >", onClick: () => navigate("power"), focusKey: "remote.power"})),
         remoteSunshineEnabled && React.createElement(PanelSectionRow, {focusKey: "remote.sunshine"}, React.createElement(Text, null, `Sunshine ${status.sunshine.state || "unknown"}`), status.sunshine.state === "stopped" && React.createElement(Button, {label: "Recover Sunshine", onClick: async () => {if (await ensureAvailable("sunshine_restart")) void run("remote_sunshine_restart", {}, "Sunshine recovery requested");}, focusKey: "remote.sunshine.recover"})),
         React.createElement(PanelSectionRow, {focusKey: "remote.details"}, React.createElement(Button, {label: "Connection details  >", onClick: () => navigate("details"), focusKey: "remote.details"}))
@@ -1927,6 +2010,77 @@
       );
     }
 
+    function renderRemoteDisplayOrder() {
+      const order = remote?.display_order || {};
+      const outputs = Array.isArray(order.outputs) ? order.outputs : [];
+      const byKey = new Map(outputs.filter(item => item && item.output_key).map(item => [item.output_key, item]));
+      const connected = displayOrderKeys({display_order: order}).map(key => byKey.get(key)).filter(Boolean);
+      const savedKeys = Array.isArray(order.saved_output_keys) ? order.saved_output_keys : [];
+      const savedConnectedKeys = savedKeys.filter(key => byKey.get(key)?.connected === true);
+      const unavailableSaved = savedKeys.filter(key => byKey.get(key)?.connected !== true);
+      const orderedKeys = (remoteOutputOrder.length ? remoteOutputOrder : connected.map(item => item.output_key))
+        .filter(key => byKey.get(key)?.connected === true);
+      const orderedTargets = orderedKeys.map(key => byKey.get(key)).filter(Boolean);
+      const orderDirty = orderedKeys.join("|") !== savedConnectedKeys.join("|");
+      const usable = order.available === true && Number.isInteger(order.generation) && order.generation >= 0;
+      const canSave = usable && orderDirty && orderedKeys.length > 0 && !busy;
+
+      const moveOutput = (index, delta) => {
+        const target = index + delta;
+        if (target < 0 || target >= orderedKeys.length) return;
+        const next = [...orderedKeys];
+        [next[index], next[target]] = [next[target], next[index]];
+        remoteOutputOrderTouchedRef.current = true;
+        setRemoteOutputOrder(next);
+      };
+
+      const saveOrder = async restart => {
+        const value = await run(
+          "remote_display_order_save",
+          {output_keys: orderedKeys, generation: order.generation, restart},
+          restart ? "Remote output order saved; restarting Gaming Mode" : "Remote output order saved"
+        );
+        if (value) remoteOutputOrderTouchedRef.current = false;
+        return value;
+      };
+
+      if (modal?.kind === "remote-display-order-restart") {
+        return React.createElement(PanelSection, {title: "Remote Gaming Mode display order"}, React.createElement(ConfirmModal, {
+          title: "Save and restart remote Gaming Mode?",
+          body: `Running games and the Steam UI on ${identityName()} will close. This device will remain running.`,
+          confirmLabel: "Save and restart remote",
+          busy: Boolean(busy),
+          onCancel: () => setModal(null),
+          onConfirm: async () => {setModal(null); await saveOrder(true);},
+        }));
+      }
+
+      return React.createElement(PanelSection, {title: "Remote Gaming Mode display order"},
+        React.createElement(PanelSectionRow, {focusKey: "remote-order.target"},
+          React.createElement(Text, null, `Target device: ${identityName()}`),
+          React.createElement(Text, {muted: true}, "Changes the remote device only. This device's screens are under This device.")),
+        order.reason && React.createElement(PanelSectionRow, {focusKey: "remote-order.status"}, React.createElement(Text, {live: true}, order.reason)),
+        !outputs.length && React.createElement(PanelSectionRow, {focusKey: "remote-order.empty"}, React.createElement(Text, null, "No physical screens were advertised by the remote device.")),
+        orderedTargets.map((output, index) => React.createElement(PanelSectionRow, {key: output.output_key, focusKey: `remote-order.${output.output_key}`},
+          React.createElement(Text, null, `${index + 1}. ${localOutputName(output)}${output.active === true ? " — Active" : ""}`),
+          React.createElement(Text, {muted: true}, localOutputDetails(output)),
+          React.createElement(Button, {label: "Move up", disabled: !usable || Boolean(busy) || index === 0, onClick: () => moveOutput(index, -1), focusKey: `remote-order.${output.output_key}.up`}),
+          React.createElement(Button, {label: "Move down", disabled: !usable || Boolean(busy) || index === orderedTargets.length - 1, onClick: () => moveOutput(index, 1), focusKey: `remote-order.${output.output_key}.down`})
+        )),
+        outputs.filter(output => output.connected !== true).map(output => React.createElement(PanelSectionRow, {key: `disconnected.${output.output_key}`, focusKey: `remote-order.disconnected.${output.output_key}`},
+          React.createElement(Text, null, `${localOutputName(output)} — Disconnected`),
+          React.createElement(Text, {muted: true}, localOutputDetails(output)))),
+        unavailableSaved.length > 0 && React.createElement(PanelSectionRow, {focusKey: "remote-order.saved-unavailable"}, React.createElement(Text, {muted: true}, `${unavailableSaved.length} saved remote screen${unavailableSaved.length === 1 ? " is" : "s are"} currently disconnected.`)),
+        orderDirty && React.createElement(PanelSectionRow, {focusKey: "remote-order.unsaved"}, React.createElement(Text, {live: true}, "Remote display order has unsaved changes.")),
+        React.createElement(PanelSectionRow, {focusKey: "remote-order.save"}, React.createElement(Button, {label: "Save for next session", disabled: !canSave, onClick: () => void saveOrder(false), focusKey: "remote-order.save.button"})),
+        React.createElement(PanelSectionRow, {focusKey: "remote-order.save-restart"}, React.createElement(Button, {label: "Save and restart Gaming Mode", disabled: !canSave || order.restart_available !== true, onClick: () => setModal({kind: "remote-display-order-restart"}), focusKey: "remote-order.save-restart.button"})),
+        React.createElement(PanelSectionRow, {focusKey: "remote-order.automatic"}, React.createElement(Button, {label: "Use automatic display order", disabled: Boolean(busy) || !remote?.display_order || order.unsupported === true, onClick: async () => {const value = await run("remote_display_order_reset", {}, "Remote automatic display order restored"); if (value) {remoteOutputOrderTouchedRef.current = false; setRemoteOutputOrder([]);}}, focusKey: "remote-order.automatic.button"})),
+        renderActionSummary(),
+        React.createElement(PanelSectionRow, {focusKey: "remote-order.refresh"}, React.createElement(Button, {label: "Refresh", disabled: Boolean(busy), onClick: () => {remoteOutputOrderTouchedRef.current = false; void loadRemoteDisplayOrder();}, focusKey: "remote-order.refresh"})),
+        React.createElement(PanelSectionRow, {focusKey: "remote-order.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("remote"), focusKey: "remote-order.back"}))
+      );
+    }
+
     function renderDetails() {
       const endpoint = String(remote?.endpoint || "");
       const matched = endpoint.match(/^https:\/\/(\[[^\]]+\]|[^:/]+)(?::([0-9]+))?\/?$/i);
@@ -1968,20 +2122,33 @@
               ? "Running."
               : sunshine.state === "restarting"
                 ? "Recovery in progress."
-              : sunshine.reason || "Checking status."
+                : sunshine.reason || "Checking status."
         : server.provider?.reason || sunshine.reason || "Owner bridge unavailable.";
+      const localOrder = settings?.local_display_order?.display_order || {};
+      const localDisplay = settings?.local_display || {};
+      const localCount = Array.isArray(localOrder.outputs)
+        ? localOrder.outputs.filter(output => output.connected === true).length
+        : Number.isInteger(localDisplay.connected_count) ? localDisplay.connected_count : null;
+      const localView = roleHasServer(mode) ? "local-display" : "local-display-order";
       return React.createElement(PanelSection, {title: "This device"},
-        React.createElement(PanelSectionRow, {focusKey: "this-device.status"}, React.createElement(Text, null, "Remote access to this device"), React.createElement(Text, {live: true}, paused ? "Server paused" : `Accepting connections on ${listener.address || "all interfaces"}:${listener.port || 18443}`)),
-        React.createElement(PanelSectionRow, {focusKey: "this-device.listener"}, React.createElement(Button, {label: listener.running ? "Pause accepting connections" : "Accept connections", disabled: Boolean(busy), onClick: () => void run("update_settings", {changes: {listen_enabled: !listener.running}}, listener.running ? "Server paused" : "Server listening"), focusKey: "this-device.listener"})),
-        React.createElement(PanelSectionRow, {focusKey: "this-device.display"}, React.createElement(Button, {label: "Display order  >", onClick: () => navigate("local-display"), focusKey: "this-device.display"})),
+        React.createElement(PanelSection, {title: "Local device"},
+          React.createElement(PanelSectionRow, {focusKey: "this-device.local.explanation"}, React.createElement(Text, null, "Controls on this device only"), React.createElement(Text, {muted: true}, "This display order chooses the Gaming Mode screen on this handheld; it never changes the paired remote device.")),
+          React.createElement(PanelSectionRow, {focusKey: "this-device.local.status"}, React.createElement(Text, null, localCount === null ? "Screen inventory not loaded" : `${localCount} connected ${localCount === 1 ? "screen" : "screens"}`), localOrder.reason && React.createElement(Text, {muted: true}, localOrder.reason)),
+          React.createElement(PanelSectionRow, {focusKey: "this-device.display"}, React.createElement(Button, {label: "Display order  >", onClick: () => navigate(localView), focusKey: "this-device.display"}))
+        ),
+        roleHasClient(mode) && !roleHasServer(mode) && React.createElement(PanelSectionRow, {focusKey: "this-device.remote-note"}, React.createElement(Text, {muted: true}, "Remote controls are under Remote device.")),
         React.createElement(PanelSectionRow, {focusKey: "this-device.settings"}, React.createElement(Button, {label: "Advanced settings  >", onClick: () => navigate("settings"), focusKey: "this-device.settings"})),
-        React.createElement(PanelSection, {title: "Sunshine"},
+        roleHasServer(mode) && React.createElement(PanelSection, {title: "Remote access to this device"},
+          React.createElement(PanelSectionRow, {focusKey: "this-device.status"}, React.createElement(Text, {live: true}, paused ? "Server paused" : `Accepting connections on ${listener.address || "all interfaces"}:${listener.port || 18443}`)),
+          React.createElement(PanelSectionRow, {focusKey: "this-device.listener"}, React.createElement(Button, {label: listener.running ? "Pause accepting connections" : "Accept connections", disabled: Boolean(busy), onClick: () => void run("update_settings", {changes: {listen_enabled: !listener.running}}, listener.running ? "Server paused" : "Server listening"), focusKey: "this-device.listener"}))
+        ),
+        roleHasServer(mode) && React.createElement(PanelSection, {title: "Sunshine"},
           React.createElement(PanelSectionRow, {focusKey: "this-device.sunshine.status"}, React.createElement(Text, null, `Sunshine ${sunshine.state || "unknown"}`), React.createElement(Text, {muted: true}, sunshineDescription)),
           sunshineRecoverable && React.createElement(PanelSectionRow, {focusKey: "this-device.sunshine.recover"}, React.createElement(Button, {label: "Recover Sunshine", disabled: Boolean(busy), onClick: () => void run("local_sunshine_restart", {}, "Sunshine recovery requested"), focusKey: "this-device.sunshine.recover"}))
         ),
-        pending.length ? React.createElement(PanelSection, {title: "Pairing requests"}, pending.map(item => React.createElement(PanelSectionRow, {key: item.pairing_id, focusKey: `incoming.${item.pairing_id}`}, React.createElement(Text, null, item.client_name || "Unknown client"), item.verification_code && React.createElement(Text, null, `Code: ${item.verification_code}`), React.createElement(Text, {muted: true}, "Confirm the same code on both devices."), React.createElement(Button, {label: "Reject", disabled: Boolean(busy), onClick: () => void run("reject_pairing", {pairing_id: item.pairing_id}, "Pairing rejected"), focusKey: `incoming.${item.pairing_id}.reject`, autoFocus: true}), React.createElement(Button, {label: "Approve", disabled: Boolean(busy), onClick: () => void run("approve_pairing", {pairing_id: item.pairing_id, scopes: item.requested_scopes}, "Pairing approved"), focusKey: `incoming.${item.pairing_id}.approve`})))) : null,
-        React.createElement(PanelSection, {title: "Paired clients"}, clients.length ? clients.map(item => React.createElement(PanelSectionRow, {key: item.client_id, focusKey: `client.${item.client_id}`}, React.createElement(Text, null, item.name || "Unnamed client"), React.createElement(Text, {muted: true}, clientType(item) + " · Paired"), React.createElement(Text, {muted: true}, clientPermissions(item) || "No permissions"), React.createElement(Button, {label: "Remove access", disabled: Boolean(busy), onClick: () => setModal({kind: "revoke", client: item}), focusKey: `client.${item.client_id}.remove`, danger: true}))) : React.createElement(PanelSectionRow, {focusKey: "this-device.no-clients"}, React.createElement(Text, null, "No paired clients."))),
-        modal?.kind === "revoke" && React.createElement(ConfirmModal, {title: `Remove ${modal.client.name || "client"}'s access to this device?`, body: "This removes incoming access only; it does not remove this handheld's outgoing pairing.", confirmLabel: "Remove access", busy: Boolean(busy), danger: true, onCancel: () => setModal(null), onConfirm: async () => {const id = modal.client.client_id; setModal(null); await run("revoke_client", {client_id: id}, "Client access removed");}})
+        roleHasServer(mode) && pending.length ? React.createElement(PanelSection, {title: "Pairing requests"}, pending.map(item => React.createElement(PanelSectionRow, {key: item.pairing_id, focusKey: `incoming.${item.pairing_id}`}, React.createElement(Text, null, item.client_name || "Unknown client"), item.verification_code && React.createElement(Text, null, `Code: ${item.verification_code}`), React.createElement(Text, {muted: true}, "Confirm the same code on both devices."), React.createElement(Button, {label: "Reject", disabled: Boolean(busy), onClick: () => void run("reject_pairing", {pairing_id: item.pairing_id}, "Pairing rejected"), focusKey: `incoming.${item.pairing_id}.reject`, autoFocus: true}), React.createElement(Button, {label: "Approve", disabled: Boolean(busy), onClick: () => void run("approve_pairing", {pairing_id: item.pairing_id, scopes: item.requested_scopes}, "Pairing approved"), focusKey: `incoming.${item.pairing_id}.approve`})))) : null,
+        roleHasServer(mode) && React.createElement(PanelSection, {title: "Paired clients"}, clients.length ? clients.map(item => React.createElement(PanelSectionRow, {key: item.client_id, focusKey: `client.${item.client_id}`}, React.createElement(Text, null, item.name || "Unnamed client"), React.createElement(Text, {muted: true}, clientType(item) + " · Paired"), React.createElement(Text, {muted: true}, clientPermissions(item) || "No permissions"), React.createElement(Button, {label: "Remove access", disabled: Boolean(busy), onClick: () => setModal({kind: "revoke", client: item}), focusKey: `client.${item.client_id}.remove`, danger: true}))) : React.createElement(PanelSectionRow, {focusKey: "this-device.no-clients"}, React.createElement(Text, null, "No paired clients."))),
+        roleHasServer(mode) && modal?.kind === "revoke" && React.createElement(ConfirmModal, {title: `Remove ${modal.client.name || "client"}'s access to this device?`, body: "This removes incoming access only; it does not remove this handheld's outgoing pairing.", confirmLabel: "Remove access", busy: Boolean(busy), danger: true, onCancel: () => setModal(null), onConfirm: async () => {const id = modal.client.client_id; setModal(null); await run("revoke_client", {client_id: id}, "Client access removed");}})
       );
     }
 
@@ -2089,6 +2256,76 @@
         React.createElement(PanelSectionRow, {focusKey: "local-display.preview-button"}, React.createElement(Button, {label: selectedOutput ? `Preview ${localOutputName(selectedOutput)}` : "Preview selected screen", disabled: !canSelect || Boolean(busy), onClick: () => void run("local_display_preview", {output_key: selectedOutput.output_key, generation: local.generation}, "Checking screen preview…"), focusKey: "local-display.preview-button"})),
         React.createElement(PanelSectionRow, {focusKey: "local-display.refresh"}, React.createElement(Button, {label: "Refresh inventory", disabled: Boolean(busy), onClick: () => void loadLocalDisplay(), focusKey: "local-display.refresh"})),
         React.createElement(PanelSectionRow, {focusKey: "local-display.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-display.back"}))
+      );
+    }
+
+    function renderLocalDisplayOrder() {
+      const order = settings?.local_display_order?.display_order || {};
+      const outputs = Array.isArray(order.outputs) ? order.outputs : [];
+      const byKey = new Map(outputs.filter(item => item && item.output_key).map(item => [item.output_key, item]));
+      const connected = displayOrderKeys({display_order: order}).map(key => byKey.get(key)).filter(Boolean);
+      const savedKeys = Array.isArray(order.saved_output_keys) ? order.saved_output_keys : [];
+      const savedConnectedKeys = savedKeys.filter(key => byKey.get(key)?.connected === true);
+      const unavailableSaved = savedKeys.filter(key => byKey.get(key)?.connected !== true);
+      const orderedKeys = (localOutputOrder.length ? localOutputOrder : connected.map(item => item.output_key))
+        .filter(key => byKey.get(key)?.connected === true);
+      const orderedTargets = orderedKeys.map(key => byKey.get(key)).filter(Boolean);
+      const orderDirty = orderedKeys.join("|") !== savedConnectedKeys.join("|");
+      const usable = order.available === true && Number.isInteger(order.generation) && order.generation >= 0;
+      const canSave = usable && orderDirty && orderedKeys.length > 0 && !busy;
+
+      const moveOutput = (index, delta) => {
+        const target = index + delta;
+        if (target < 0 || target >= orderedKeys.length) return;
+        const next = [...orderedKeys];
+        [next[index], next[target]] = [next[target], next[index]];
+        localDisplayOrderTouchedRef.current = true;
+        setLocalOutputOrder(next);
+      };
+
+      const saveOrder = async restart => {
+        const value = await run(
+          "local_display_order_save",
+          {output_keys: orderedKeys, generation: order.generation, restart},
+          restart ? "Local output order saved; restarting Gaming Mode" : "Local output order saved"
+        );
+        if (value) localDisplayOrderTouchedRef.current = false;
+        return value;
+      };
+
+      if (modal?.kind === "local-display-order-restart") {
+        return React.createElement(PanelSection, {title: "This device · Gaming Mode display order"}, React.createElement(ConfirmModal, {
+          title: "Save and restart Gaming Mode on this device?",
+          body: "Running games and the Steam UI on this device will close. The paired remote device will not be affected.",
+          confirmLabel: "Save and restart this device",
+          busy: Boolean(busy),
+          onCancel: () => setModal(null),
+          onConfirm: async () => {setModal(null); await saveOrder(true);},
+        }));
+      }
+
+      return React.createElement(PanelSection, {title: "This device · Gaming Mode display order"},
+        React.createElement(PanelSectionRow, {focusKey: "local-order.target"},
+          React.createElement(Text, null, "Target device: This device"),
+          React.createElement(Text, {muted: true}, "Changes this handheld only. Remote controls are under Remote device.")),
+        order.reason && React.createElement(PanelSectionRow, {focusKey: "local-order.status"}, React.createElement(Text, {live: true}, order.reason)),
+        !outputs.length && React.createElement(PanelSectionRow, {focusKey: "local-order.empty"}, React.createElement(Text, null, "No physical screens were detected on this device.")),
+        orderedTargets.map((output, index) => React.createElement(PanelSectionRow, {key: output.output_key, focusKey: `local-order.${output.output_key}`},
+          React.createElement(Text, null, `${index + 1}. ${localOutputName(output)}${output.active === true ? " — Active" : ""}`),
+          React.createElement(Text, {muted: true}, localOutputDetails(output)),
+          React.createElement(Button, {label: "Move up", disabled: !usable || Boolean(busy) || index === 0, onClick: () => moveOutput(index, -1), focusKey: `local-order.${output.output_key}.up`}),
+          React.createElement(Button, {label: "Move down", disabled: !usable || Boolean(busy) || index === orderedTargets.length - 1, onClick: () => moveOutput(index, 1), focusKey: `local-order.${output.output_key}.down`})
+        )),
+        outputs.filter(output => output.connected !== true).map(output => React.createElement(PanelSectionRow, {key: `disconnected.${output.output_key}`, focusKey: `local-order.disconnected.${output.output_key}`},
+          React.createElement(Text, null, `${localOutputName(output)} — Disconnected`),
+          React.createElement(Text, {muted: true}, localOutputDetails(output)))),
+        unavailableSaved.length > 0 && React.createElement(PanelSectionRow, {focusKey: "local-order.saved-unavailable"}, React.createElement(Text, {muted: true}, `${unavailableSaved.length} saved screen${unavailableSaved.length === 1 ? " is" : "s are"} currently disconnected.`)),
+        orderDirty && React.createElement(PanelSectionRow, {focusKey: "local-order.unsaved"}, React.createElement(Text, {live: true}, "Local display order has unsaved changes.")),
+        React.createElement(PanelSectionRow, {focusKey: "local-order.save"}, React.createElement(Button, {label: "Save for next session", disabled: !canSave, onClick: () => void saveOrder(false), focusKey: "local-order.save.button"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-order.save-restart"}, React.createElement(Button, {label: "Save and restart Gaming Mode", disabled: !canSave || order.restart_available !== true, onClick: () => setModal({kind: "local-display-order-restart"}), focusKey: "local-order.save-restart.button"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-order.automatic"}, React.createElement(Button, {label: "Use automatic display order", disabled: Boolean(busy) || !settings?.local_display_order, onClick: async () => {const value = await run("local_display_order_reset", {}, "Local automatic display order restored"); if (value) {localDisplayOrderTouchedRef.current = false; setLocalOutputOrder([]);}}, focusKey: "local-order.automatic.button"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-order.refresh"}, React.createElement(Button, {label: "Refresh", disabled: Boolean(busy), onClick: () => {localDisplayOrderTouchedRef.current = false; void loadLocalDisplayOrder();}, focusKey: "local-order.refresh"})),
+        React.createElement(PanelSectionRow, {focusKey: "local-order.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("this-device"), focusKey: "local-order.back"}))
       );
     }
 
@@ -2324,7 +2561,7 @@
           React.createElement(PanelSectionRow, {focusKey: "settings.address"}, React.createElement(Text, {muted: true}, `Address: ${server.listener?.address || "all interfaces"}:${server.listener?.port || 18443}`)),
           React.createElement(PanelSectionRow, {focusKey: "settings.sunshine"}, React.createElement(Text, null, "Sunshine monitoring"), React.createElement("label", null, React.createElement("input", {type: "checkbox", checked: server.settings?.monitor_sunshine === true, disabled: !roleHasServer(mode), onChange: event => void run("update_settings", {changes: {monitor_sunshine: event.target.checked}})}), " Monitor Sunshine")),
           React.createElement(PanelSectionRow, {focusKey: "settings.sunshine-auto"}, React.createElement(Text, null, "Sunshine recovery"), React.createElement("label", null, React.createElement("input", {type: "checkbox", checked: server.settings?.auto_recover_sunshine !== false, disabled: !roleHasServer(mode) || server.settings?.monitor_sunshine !== true, onChange: event => void run("update_settings", {changes: {auto_recover_sunshine: event.target.checked}})}), " Auto-recover after a confirmed crash")),
-          !roleHasServer(mode) && React.createElement(PanelSectionRow, {focusKey: "settings.local-display-role"}, React.createElement(Text, {muted: true}, "Local Gaming Mode screen controls require Server or Both mode. Client mode controls a remote device only."))
+          !roleHasServer(mode) && React.createElement(PanelSectionRow, {focusKey: "settings.local-display-role"}, React.createElement(Text, {muted: true}, "This device's Gaming Mode display order is under This device. Remote display settings and controls are under Remote device."))
         ),
         React.createElement(PanelSectionRow, {focusKey: "settings.back"}, React.createElement(Button, {label: "Back", onClick: () => {
           if (modeDirty) setModal({kind: "discard-mode"});
@@ -2347,10 +2584,12 @@
       if (view === "pairing") return renderPairing();
       if (view === "replace") return renderReplace();
       if (view === "this-device") return renderThisDevice();
+      if (view === "local-display-order") return renderLocalDisplayOrder();
       if (view === "local-display") return renderLocalDisplay();
       if (view === "settings") return renderSettings();
       if (view === "power") return renderPower();
       if (view === "display") return renderDisplay();
+      if (view === "remote-display-order") return renderRemoteDisplayOrder();
       if (view === "details") return renderDetails();
       if (view === "remote") return renderOverview();
       return renderOverview();

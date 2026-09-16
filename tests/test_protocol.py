@@ -50,6 +50,24 @@ class ProtocolTests(unittest.TestCase):
                 with self.assertRaises(ProtocolError):
                     validate_route_body("POST", "/v1/display/save-current", changed)
 
+    def test_display_order_routes_validate_opaque_keys_and_exact_bodies(self):
+        body = {"request_id": "order-request", "output_keys": ["drm:card0:DP-1", "drm:card0:HDMI-A-2"], "generation": 7, "restart": False}
+        self.assertEqual(validate_route_body("POST", "/v1/display/order", body), body)
+        reset = {"request_id": "reset-request"}
+        self.assertEqual(validate_route_body("POST", "/v1/display/order/automatic", reset), reset)
+        for changed in (
+            {**body, "output_keys": ["drm:card0:DP-1", "drm:card0:DP-1"]},
+            {**body, "output_keys": ["bad;command"]},
+            {**body, "generation": True},
+            {**body, "restart": 1},
+            {**body, "extra": True},
+        ):
+            with self.subTest(body=changed):
+                with self.assertRaises(ProtocolError):
+                    validate_route_body("POST", "/v1/display/order", changed)
+        with self.assertRaises(ProtocolError):
+            validate_route_body("POST", "/v1/display/order/automatic", {**reset, "extra": True})
+
     def test_pair_request_accepts_exactly_one_bootstrap_form(self):
         common = {"client_id": "client-test", "client_name": "Test", "scopes": ["status.read"]}
         nonce = NONCE_VECTOR

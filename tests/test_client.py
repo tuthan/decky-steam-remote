@@ -93,6 +93,30 @@ class FakeRemoteCore:
             "preview": None,
         }
 
+    def display_order(self):
+        return {
+            "protocol_version": 1,
+            "display_order": {
+                "available": True,
+                "generation": 4,
+                "observed_at": "2026-09-16T00:00:00Z",
+                "output_keys": ["drm:card0:DP-1", "drm:card0:HDMI-A-2"],
+                "outputs": [
+                    {"output_key": "drm:card0:DP-1", "display_name": "Desk monitor", "connector": "DP-1", "connected": True, "active": True},
+                    {"output_key": "drm:card0:HDMI-A-2", "display_name": "Living room TV", "connector": "HDMI-A-2", "connected": True, "active": False},
+                ],
+                "saved_output_keys": [],
+                "restart_required": True,
+                "restart_available": True,
+                "adapter": "gamescope-session-prefer-output",
+                "unsupported": False,
+                "stale": False,
+                "ambiguous": False,
+                "previous_reading": False,
+                "reason": None,
+            },
+        }
+
     def operation(self, operation_id):
         return {"operation": {"id": operation_id, "state": "succeeded", "outcome": "observed"}}
 
@@ -283,6 +307,49 @@ class ClientTests(unittest.TestCase):
             finally:
                 service.stop()
 
+    def test_client_controls_remote_display_order_with_persisted_operations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core = FakeRemoteCore()
+            service = ClientService(directory, core_factory=lambda *args, **kwargs: core)
+            service.store.mutate(lambda state: state.__setitem__("remote", {
+                **REMOTE_CANDIDATE,
+                "token": "remote-secret-token",
+                "scopes": ["status.read", "power.control", "display.control"],
+                "status": bridge_snapshot(),
+                "outputs": [],
+                "display_order": None,
+                "profiles": [],
+                "preview": None,
+            }))
+            service.start()
+            try:
+                order = service.read_display_order()
+                self.assertTrue(order["display_order"]["available"])
+                self.assertEqual(service.public_status()["remote"]["display_order"]["generation"], 4)
+
+                saved = service.save_display_order(
+                    ["drm:card0:HDMI-A-2", "drm:card0:DP-1"],
+                    4,
+                    restart=True,
+                )
+                self.assertEqual(saved["state"], "accepted")
+                self.assertEqual(core.mutations[-1], (
+                    "/v1/display/order",
+                    {
+                        "request_id": service.store.get("operations", {})[saved["id"]]["request_id"],
+                        "output_keys": ["drm:card0:HDMI-A-2", "drm:card0:DP-1"],
+                        "generation": 4,
+                        "restart": True,
+                    },
+                ))
+                service.check_operation(saved["id"])
+
+                reset = service.reset_display_order()
+                self.assertEqual(reset["state"], "accepted")
+                self.assertEqual(core.mutations[-1][0], "/v1/display/order/automatic")
+            finally:
+                service.stop()
+
     def test_reload_turns_an_unsettled_send_into_an_explicit_unknown_result(self):
         with tempfile.TemporaryDirectory() as directory:
             service = ClientService(directory)
@@ -364,6 +431,8 @@ class ClientTests(unittest.TestCase):
             client_status = wait_for("client")
             self.assertTrue(client_status["roles"]["client"]["running"])
             self.assertFalse(client_status["roles"]["server"]["running"])
+            local_order = coordinator.local_display_order()
+            self.assertIn("display_order", local_order)
             host_id = coordinator.host.host_id
 
             coordinator.set_mode("both")

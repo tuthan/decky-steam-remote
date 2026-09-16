@@ -192,6 +192,15 @@ class Plugin:
     async def local_sunshine_restart(self):
         return await _threaded_call("local_sunshine_restart", self.service.local_sunshine_restart)
 
+    async def local_display_order(self):
+        return await _threaded_call("local_display_order", self.service.local_display_order)
+
+    async def local_display_order_save(self, output_keys, generation, restart=False):
+        return await _threaded_call("local_display_order_save", self.service.local_display_order_save, output_keys, generation, restart)
+
+    async def local_display_order_reset(self):
+        return await _threaded_call("local_display_order_reset", self.service.local_display_order_reset)
+
     # Outgoing client RPCs.  Every network method runs in a bounded worker so
     # a slow remote host cannot block the incoming Steam bridge.
     async def discover_remote_devices(self, port=18443, endpoints=None):
@@ -227,8 +236,17 @@ class Plugin:
     async def remote_outputs(self):
         return await _threaded_call("remote_outputs", self.service.remote_outputs)
 
-    async def remote_action_availability(self, action, output_id=None, mode_id=None):
-        return await _threaded_call("remote_action_availability", self.service.remote_action_availability, action, output_id, mode_id)
+    async def remote_display_order(self):
+        return await _threaded_call("remote_display_order", self.service.remote_display_order)
+
+    async def remote_display_order_save(self, output_keys, generation, restart=False):
+        return await _threaded_call("remote_display_order_save", self.service.remote_display_order_save, output_keys, generation, restart)
+
+    async def remote_display_order_reset(self):
+        return await _threaded_call("remote_display_order_reset", self.service.remote_display_order_reset)
+
+    async def remote_action_availability(self, action, output_id=None, mode_id=None, output_keys=None, generation=None):
+        return await _threaded_call("remote_action_availability", self.service.remote_action_availability, action, output_id, mode_id, output_keys, generation)
 
     async def remote_power(self, action):
         return await _threaded_call("remote_power", self.service.remote_power, action)
