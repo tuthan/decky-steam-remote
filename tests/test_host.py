@@ -249,7 +249,7 @@ class HostTests(unittest.TestCase):
             with self.assertRaises(Exception) as mismatch:
                 service.handle_http(
                     "POST", "/v1/pair/request",
-                    {"X-SteamOS-Remote-TLS-Binding": base64.urlsafe_b64encode(b"different-channel").decode("ascii")},
+                    {"X-SteamOS-Companion-TLS-Binding": base64.urlsafe_b64encode(b"different-channel").decode("ascii")},
                     request,
                     peer_address="192.168.50.20",
                     channel_binding=binding,
@@ -257,7 +257,7 @@ class HostTests(unittest.TestCase):
             self.assertEqual(mismatch.exception.code, "pairing_channel_mismatch")
             pending = service.handle_http(
                 "POST", "/v1/pair/request",
-                {"X-SteamOS-Remote-TLS-Binding": binding},
+                {"X-SteamOS-Companion-TLS-Binding": binding},
                 request,
                 peer_address="192.168.50.20",
                 channel_binding=binding,

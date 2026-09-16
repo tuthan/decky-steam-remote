@@ -1,4 +1,4 @@
-"""Client-side coordinator for a single pinned SteamOS Remote host.
+"""Client-side coordinator for a single pinned SteamOS Companion host.
 
 The client is intentionally kept out of :mod:`service`.  Host identity,
 incoming approvals, the Steam bridge, and the host operation journal remain in
@@ -126,7 +126,7 @@ class BoundedWorkQueue:
     raising, which gives its owner a terminal path for its busy state.
     """
 
-    def __init__(self, *, max_workers: int = 4, max_pending: int = 32, name: str = "steamos-remote-client"):
+    def __init__(self, *, max_workers: int = 4, max_pending: int = 32, name: str = "steamos-companion-client"):
         self.max_workers = max(1, min(int(max_workers), 16))
         self.max_pending = max(1, min(int(max_pending), 256))
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix=name)
@@ -482,7 +482,7 @@ class ClientService:
             "host_id": validated.host_id,
             "certificate_fingerprint": validated.certificate_fingerprint,
             "name": _safe_text(value.get("name"), 96) or None,
-            "service": "steamos-remote",
+            "service": "steamos-companion",
         }
 
     def discover(self, *, port: int = 18443, endpoints: list[str] | None = None) -> list[dict[str, Any]]:

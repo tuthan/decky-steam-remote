@@ -144,7 +144,7 @@ def validate_route_body(method: str, path: str, body: dict[str, Any] | None) -> 
     if path == "/v1/pair/request":
         if "verification_code" in body:
             raise ProtocolError(
-                "this host requires an updated SteamOS Remote client; "
+                "this host requires an updated SteamOS Companion client; "
                 "the client-chosen pairing code is no longer accepted",
                 400,
                 "pairing_method_unsupported",

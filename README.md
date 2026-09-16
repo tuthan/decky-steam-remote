@@ -1,15 +1,18 @@
-# SteamOS Remote
+# SteamOS Companion
 
-SteamOS Remote is a Decky Loader plugin for controlling and monitoring another
-Steam Deck from the companion [Omarchy client](https://github.com/tuthan/omarchy-steam-remote)
+SteamOS Companion is a Decky Loader plugin for controlling and monitoring another
+Steam Deck from the companion [Omarchy client](https://github.com/tuthan/steamos-companion-omarchy)
 over a local network. The same install can run as a Client, Server, or Both.
 
 This repository contains the Decky host in `host/` and the shared protocol
 contract in `protocol/`.
 
+SteamOS Companion is an independent open-source project and is not affiliated
+with or endorsed by Valve Corporation.
+
 ## Preview
 
-![SteamOS Remote Decky host preview](assets/preview.png)
+![SteamOS Companion Decky host preview](assets/preview.png)
 
 ## Install
 
@@ -17,8 +20,8 @@ Decky Loader must already be installed.
 
 ### Decky UI
 
-1. Download `steamos-remote-decky-<version>.zip` from the
-   [Releases](https://github.com/tuthan/decky-steam-remote/releases) page.
+1. Download `steamos-companion-decky-<version>.zip` from the
+   [Releases](https://github.com/tuthan/steamos-companion-decky/releases) page.
 2. Install the ZIP with Decky’s plugin installer.
 3. If needed, use Decky’s **Reload Plugins** action.
 
@@ -48,7 +51,7 @@ To install a specific release:
 ssh deck@steamdeck.local 'bash -s -- v0.5.13' < install.sh
 ```
 
-The installer copies the plugin to `~/homebrew/plugins/steamos-remote` and
+The installer copies the plugin to `~/homebrew/plugins/steamos-companion` and
 asks Decky to reload its plugins. Run it as the `deck` user; `sudo` is used to
 create, replace, and update the Decky plugin directory. If the reload endpoint
 is unavailable, use Decky’s **Reload Plugins** action.
@@ -56,7 +59,7 @@ is unavailable, use Decky’s **Reload Plugins** action.
 The installer can also be run directly on the Deck:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tuthan/decky-steam-remote/main/install.sh | bash -s -- v0.5.13
+curl -fsSL https://raw.githubusercontent.com/tuthan/steamos-companion-decky/main/install.sh | bash -s -- v0.5.13
 ```
 
 ## Device modes
@@ -165,7 +168,7 @@ node host/frontend/test_frontend.cjs
 python3 host/build.py
 ```
 
-The build writes `artifacts/steamos-remote-decky-<version>.zip` and its
+The build writes `artifacts/steamos-companion-decky-<version>.zip` and its
 `SHA256` file.
 
 ## License

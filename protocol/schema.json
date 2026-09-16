@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://steamos-remote.local/protocol/v1/schema.json",
-  "title": "SteamOS Remote v1 wire contract",
+  "$id": "https://steamos-companion.local/protocol/v1/schema.json",
+  "title": "SteamOS Companion v1 wire contract",
   "type": "object",
   "required": ["protocol_version"],
   "properties": {

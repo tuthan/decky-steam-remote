@@ -1,4 +1,4 @@
-"""Dependency-free client core for the SteamOS Remote v1 protocol.
+"""Dependency-free client core for the SteamOS Companion v1 protocol.
 
 The Decky plugin is both a host and, optionally, a client.  This module is
 deliberately independent from Decky's frontend and from the host service so
@@ -81,7 +81,7 @@ class DiscoveryCandidate:
     endpoint: str
     host_id: str
     certificate_fingerprint: str
-    service: str = "steamos-remote"
+    service: str = "steamos-companion"
     name: str | None = None
 
     def public(self) -> dict[str, Any]:
@@ -297,7 +297,7 @@ class PinnedTransport:
             headers["Authorization"] = f"Bearer {token}"
         connection = self._connect(pairing)
         if pairing and self.last_channel_binding:
-            headers["X-SteamOS-Remote-TLS-Binding"] = self.last_channel_binding
+            headers["X-SteamOS-Companion-TLS-Binding"] = self.last_channel_binding
         try:
             connection.request(method, path, body=raw or None, headers=headers)
             response = connection.getresponse()
@@ -478,8 +478,8 @@ def probe_device(endpoint: str, *, timeout: float = DISCOVERY_TIMEOUT) -> dict[s
     """Probe only the unauthenticated service marker and certificate identity."""
     transport = PinnedTransport(endpoint, timeout=timeout)
     value = transport.request("GET", "/v1/discovery")
-    if value.get("protocol_version") != 1 or value.get("service") != "steamos-remote":
-        raise ClientError("the endpoint is not a SteamOS Remote server", "not_remote_server")
+    if value.get("protocol_version") != 1 or value.get("service") != "steamos-companion":
+        raise ClientError("the endpoint is not a SteamOS Companion server", "not_companion_server")
     host_id = value.get("host_id")
     fingerprint = value.get("certificate_fingerprint") or transport.last_fingerprint
     if not isinstance(host_id, str) or not host_id or not isinstance(fingerprint, str):
@@ -492,7 +492,7 @@ def probe_device(endpoint: str, *, timeout: float = DISCOVERY_TIMEOUT) -> dict[s
         endpoint=endpoint_value,
         host_id=host_id,
         certificate_fingerprint=fingerprint,
-        service="steamos-remote",
+        service="steamos-companion",
         name=value.get("name") if isinstance(value.get("name"), str) else None,
     ).public()
 
@@ -517,7 +517,7 @@ def discover_local_devices(
     found: dict[int, dict[str, Any]] = {}
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=min(16, max(1, len(targets))),
-        thread_name_prefix="steamos-remote-discovery",
+        thread_name_prefix="steamos-companion-discovery",
     )
     futures = {executor.submit(probe_function, endpoint): index for index, endpoint in enumerate(targets)}
     pending = set(futures)

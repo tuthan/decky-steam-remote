@@ -1,4 +1,4 @@
-# SteamOS Remote protocol v1
+# SteamOS Companion protocol v1
 
 `schema.json` and the fixtures in this directory are the authoritative v1
 wire contract for the Decky host and the separate Omarchy client. The host
@@ -24,7 +24,7 @@ from the same nonce and its own certificate fingerprint. Both sides use:
 
 ```
 code = scrypt(nonce,
-              salt = b"steamos-remote:v1:pairing-sas:" + fingerprint,
+              salt = b"steamos-companion:v1:pairing-sas:" + fingerprint,
               n = 2**14, r = 8, p = 1, dklen = 8)
        interpreted big-endian, modulo 10**8, zero-padded to 8 digits
 ```
@@ -40,7 +40,7 @@ candidate, 16 MiB working set) puts that far outside the 120-second request
 window. This is what the previous client-chosen `verification_code` form failed
 to do, and that field is now rejected with `400 pairing_method_unsupported`.
 
-The request also includes `X-SteamOS-Remote-TLS-Binding`, derived from the
+The request also includes `X-SteamOS-Companion-TLS-Binding`, derived from the
 exact TLS 1.2 channel used by the client. The host derives the same binding
 from its accepted socket and rejects a mismatch before creating a pending
 request. Regular authenticated traffic may still negotiate TLS 1.3. Decky

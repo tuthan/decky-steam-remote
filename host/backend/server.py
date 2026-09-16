@@ -80,7 +80,7 @@ class _ThreadingHTTPServerV6(_ThreadingHTTPServer):
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server_version = "SteamOSRemote/1"
+    server_version = "SteamOSCompanion/1"
     protocol_version = "HTTP/1.0"
 
     @property
@@ -193,7 +193,7 @@ class HostHttpServer:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self._httpd.serve_forever, name="steamos-remote-https", daemon=True)
+        self._thread = threading.Thread(target=self._httpd.serve_forever, name="steamos-companion-https", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:

@@ -45,7 +45,7 @@ class DeviceCoordinator:
         except Exception as exc:
             # A corrupt or unreadable existing state must be visible as a
             # recovery error.  Never create a replacement identity here.
-            self._recovery_error = f"SteamOS Remote state needs recovery: {str(exc)[:220]}"
+            self._recovery_error = f"SteamOS Companion state needs recovery: {str(exc)[:220]}"
 
         try:
             local_host_id = self.host.host_id if self.host is not None else None
@@ -69,7 +69,7 @@ class DeviceCoordinator:
         except Exception as exc:
             self.client = None
             if self._recovery_error is None:
-                self._recovery_error = f"SteamOS Remote client state needs recovery: {str(exc)[:220]}"
+                self._recovery_error = f"SteamOS Companion client state needs recovery: {str(exc)[:220]}"
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -213,7 +213,7 @@ class DeviceCoordinator:
             }
             self.client.store.mutate(lambda state: state.__setitem__("mode_transition", record))
             self._transition_cancel.clear()
-            thread = threading.Thread(target=self._apply_mode, args=(transition_id, mode), name="steamos-remote-mode", daemon=True)
+            thread = threading.Thread(target=self._apply_mode, args=(transition_id, mode), name="steamos-companion-mode", daemon=True)
             self._transition_thread = thread
             thread.start()
         return self.get_settings()

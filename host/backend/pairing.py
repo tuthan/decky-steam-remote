@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 
-PREFIX = "steamos-remote:v1:"
+PREFIX = "steamos-companion:v1:"
 MAX_PAYLOAD_LENGTH = 4096
 
 
@@ -42,7 +42,7 @@ def decode_payload(value: Any) -> dict[str, Any]:
     return result
 
 
-SAS_SALT_PREFIX = b"steamos-remote:v1:pairing-sas:"
+SAS_SALT_PREFIX = b"steamos-companion:v1:pairing-sas:"
 SAS_NONCE_BYTES = 16
 SAS_SCRYPT_N = 2 ** 14
 SAS_SCRYPT_R = 8

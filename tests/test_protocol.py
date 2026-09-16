@@ -4,7 +4,8 @@ import json
 import unittest
 from pathlib import Path
 
-from host.backend.pairing import decode_verification_nonce, derive_pairing_code
+from host.backend.client_core import DiscoveryCandidate
+from host.backend.pairing import SAS_SALT_PREFIX, PREFIX, decode_verification_nonce, derive_pairing_code
 from host.backend.protocol import ProtocolError, validate_route_body
 
 
@@ -16,6 +17,14 @@ FINGERPRINT_B = "sha256:" + "b" * 64
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_companion_namespace_constants_are_pinned(self):
+        self.assertEqual(PREFIX, "steamos-companion:v1:")
+        self.assertEqual(SAS_SALT_PREFIX, b"steamos-companion:v1:pairing-sas:")
+        self.assertEqual(
+            DiscoveryCandidate("https://host.example:18443", "host-test", "sha256:" + "a" * 64).service,
+            "steamos-companion",
+        )
+
     def test_fixtures_are_json_and_have_protocol_version(self):
         for path in sorted((Path(__file__).parents[1] / "protocol" / "fixtures").glob("*.json")):
             value = json.loads(path.read_text())
@@ -63,7 +72,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(refused.exception.code, "pairing_method_unsupported")
         self.assertEqual(
             str(refused.exception),
-            "this host requires an updated SteamOS Remote client; "
+            "this host requires an updated SteamOS Companion client; "
             "the client-chosen pairing code is no longer accepted",
         )
         # Pairing it with a valid nonce must not launder the legacy key through.
@@ -99,7 +108,7 @@ class PairingDerivationTests(unittest.TestCase):
 
     def test_known_answer_vector_pins_the_shared_derivation(self):
         # Hard-coded so the Decky host and the Omarchy client cannot drift.
-        self.assertEqual(derive_pairing_code(NONCE_VECTOR, FINGERPRINT_A), "04164056")
+        self.assertEqual(derive_pairing_code(NONCE_VECTOR, FINGERPRINT_A), "39693759")
 
     def test_derivation_is_deterministic(self):
         first = derive_pairing_code(NONCE_VECTOR, FINGERPRINT_A)

@@ -1,4 +1,4 @@
-"""Decky entry point for the SteamOS Remote host plugin."""
+"""Decky entry point for the SteamOS Companion host plugin."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ try:
     from backend import __version__ as BACKEND_VERSION
     from backend.coordinator import DeviceCoordinator
 except Exception:
-    _log("exception", "SteamOS Remote failed to import backend.service")
+    _log("exception", "SteamOS Companion failed to import backend.service")
     raise
 
 
@@ -42,8 +42,8 @@ def _state_root() -> Path:
     for name in ("DECKY_PLUGIN_SETTINGS_DIR", "DECKY_PLUGIN_RUNTIME_DIR", "DECKY_PLUGIN_DATA_DIR"):
         value = getattr(decky, name, None)
         if value:
-            return Path(value) / "steamos-remote"
-    return Path("/tmp") / "steamos-remote-decky-state"
+            return Path(value) / "steamos-companion"
+    return Path("/tmp") / "steamos-companion-decky-state"
 
 
 def _build_service() -> DeviceCoordinator:
@@ -51,16 +51,16 @@ def _build_service() -> DeviceCoordinator:
     version = getattr(decky, "DECKY_PLUGIN_VERSION", None) or BACKEND_VERSION
     _log(
         "info",
-        "SteamOS Remote loading version=%s coordinator state_root=%s",
+        "SteamOS Companion loading version=%s coordinator state_root=%s",
         version,
         root,
     )
     try:
         service = DeviceCoordinator(root)
     except Exception:
-        _log("exception", "SteamOS Remote failed to construct HostService")
+        _log("exception", "SteamOS Companion failed to construct HostService")
         raise
-    _log("info", "SteamOS Remote coordinator loaded host_id=%s mode=%s", getattr(service.host, "host_id", None), service.mode())
+    _log("info", "SteamOS Companion coordinator loaded host_id=%s mode=%s", getattr(service.host, "host_id", None), service.mode())
     return service
 
 
@@ -81,7 +81,7 @@ async def _threaded_call(method: str, function, *args, **kwargs):
     try:
         return await asyncio.to_thread(function, *args, **kwargs)
     except Exception:
-        _log("exception", "SteamOS Remote RPC failed method=%s", method)
+        _log("exception", "SteamOS Companion RPC failed method=%s", method)
         raise
 
 
@@ -92,17 +92,17 @@ class Plugin:
     service = _build_service()
 
     async def _main(self):
-        _log("info", "SteamOS Remote backend startup begin")
+        _log("info", "SteamOS Companion backend startup begin")
         try:
             status = await _threaded_call("startup", self.service.start)
         except Exception:
-            _log("exception", "SteamOS Remote backend startup failed")
+            _log("exception", "SteamOS Companion backend startup failed")
             return
         listener = status.get("listener", {}) if isinstance(status, dict) else {}
         tls = status.get("tls", {}) if isinstance(status, dict) else {}
         _log(
             "info",
-            "SteamOS Remote backend startup complete listener_running=%s listener_error=%s tls_ready=%s",
+            "SteamOS Companion backend startup complete listener_running=%s listener_error=%s tls_ready=%s",
             listener.get("running"),
             listener.get("error"),
             tls.get("ready"),
@@ -271,8 +271,8 @@ class Plugin:
         return _with_diagnostics(result)
 
     async def _unload(self):
-        _log("info", "SteamOS Remote backend shutdown begin")
+        _log("info", "SteamOS Companion backend shutdown begin")
         try:
             await _threaded_call("shutdown", self.service.stop)
         finally:
-            _log("info", "SteamOS Remote backend shutdown complete")
+            _log("info", "SteamOS Companion backend shutdown complete")

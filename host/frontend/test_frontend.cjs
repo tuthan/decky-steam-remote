@@ -141,7 +141,7 @@ function readVarint(bytes, start) {
       __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: {
         connect(version, pluginName) {
           assert.ok(version === 2 || version === 1);
-          if (pluginName === "SteamOS Remote") {
+          if (pluginName === "SteamOS Companion") {
             return {
               call(methodName, ...args) {
                 if (methodName === "get_settings") {
@@ -216,15 +216,15 @@ function readVarint(bytes, start) {
             tag_name: "v0.5.1",
             draft: false,
             prerelease: false,
-            html_url: "https://github.com/tuthan/decky-steam-remote/releases/tag/v0.5.1",
+            html_url: "https://github.com/tuthan/steamos-companion-decky/releases/tag/v0.5.1",
             assets: [
-              {name: "steamos-remote-decky-0.5.1.zip", browser_download_url: "https://github.com/tuthan/decky-steam-remote/releases/download/v0.5.1/steamos-remote-decky-0.5.1.zip", size: 100},
-              {name: "steamos-remote-decky-0.5.1.zip.sha256", browser_download_url: "https://github.com/tuthan/decky-steam-remote/releases/download/v0.5.1/steamos-remote-decky-0.5.1.zip.sha256", size: 100},
+              {name: "steamos-companion-decky-0.5.1.zip", browser_download_url: "https://github.com/tuthan/steamos-companion-decky/releases/download/v0.5.1/steamos-companion-decky-0.5.1.zip", size: 100},
+              {name: "steamos-companion-decky-0.5.1.zip.sha256", browser_download_url: "https://github.com/tuthan/steamos-companion-decky/releases/download/v0.5.1/steamos-companion-decky-0.5.1.zip.sha256", size: 100},
             ],
           }),
         };
       }
-      return {ok: true, status: 200, text: async () => `${"a".repeat(64)}  steamos-remote-decky-0.5.1.zip\n`};
+      return {ok: true, status: 200, text: async () => `${"a".repeat(64)}  steamos-companion-decky-0.5.1.zip\n`};
     },
     callPluginMethod: async (method, args = {}) => {
     legacyPluginCalls++;
@@ -256,7 +256,7 @@ function readVarint(bytes, start) {
 
   await new Promise(resolve => realSetTimeout(resolve, 250));
   assert.equal(plugin.icon.type, "svg", "the plugin should expose a native SVG icon");
-  assert.equal(plugin.icon.props["aria-label"], "SteamOS Remote");
+  assert.equal(plugin.icon.props["aria-label"], "SteamOS Companion");
   assert.equal(plugin.icon.children[0].type, "g", "the plugin icon should use a monochrome glyph");
   assert.equal(plugin.icon.children[0].props.stroke, "#f2f4f5");
   assert.equal(updateFetches.length, 2, "the updater should fetch the release and checksum through Decky");

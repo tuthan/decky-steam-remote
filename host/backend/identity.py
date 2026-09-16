@@ -145,8 +145,8 @@ def ensure_tls_material(root: str | os.PathLike[str], host_id: str) -> dict[str,
         openssl = shutil.which("openssl")
         if not openssl:
             return {"ready": False, "reason": "openssl is unavailable; cannot create host certificate"}
-        common_name = f"steamos-remote-{host_id[:32]}"
-        with tempfile.TemporaryDirectory(prefix="steamos-remote-tls-", dir=root_path) as temp_dir:
+        common_name = f"steamos-companion-{host_id[:32]}"
+        with tempfile.TemporaryDirectory(prefix="steamos-companion-tls-", dir=root_path) as temp_dir:
             temp = Path(temp_dir)
             temp_cert = temp / "cert.pem"
             temp_key = temp / "key.pem"

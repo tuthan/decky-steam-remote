@@ -54,15 +54,15 @@ def build() -> Path:
     # the backend diagnostics version, so this is only a fallback for a
     # loader that starts the UI before its first backend response.
     source_text = source.read_text(encoding="utf-8")
-    target_js.write_text(source_text.replace("__STEAMOS_REMOTE_VERSION__", version), encoding="utf-8")
+    target_js.write_text(source_text.replace("__STEAMOS_COMPANION_VERSION__", version), encoding="utf-8")
     output = ROOT / "artifacts"
     output.mkdir(exist_ok=True)
-    archive_path = output / f"steamos-remote-decky-{version}.zip"
+    archive_path = output / f"steamos-companion-decky-{version}.zip"
     with ZipFile(archive_path, "w", ZIP_DEFLATED) as archive:
         for relative in FILES:
             path = (HOST / relative).resolve()
             archive_name = relative[3:] if relative.startswith("../") else relative
-            info = ZipInfo(f"steamos-remote/{archive_name}", date_time=(2026, 9, 13, 0, 0, 0))
+            info = ZipInfo(f"steamos-companion/{archive_name}", date_time=(2026, 9, 13, 0, 0, 0))
             info.compress_type = ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             archive.writestr(info, path.read_bytes())

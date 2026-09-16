@@ -897,7 +897,7 @@ class HostService:
                 (
                     value
                     for key, value in headers.items()
-                    if isinstance(key, str) and key.lower() == "x-steamos-remote-tls-binding"
+                    if isinstance(key, str) and key.lower() == "x-steamos-companion-tls-binding"
                 ),
                 None,
             )
@@ -921,7 +921,7 @@ class HostService:
             settings = self.store.get("settings", {})
             return 200, {}, {
                 "protocol_version": 1,
-                "service": "steamos-remote",
+                "service": "steamos-companion",
                 "host_id": self.host_id,
                 "certificate_fingerprint": tls["fingerprint"],
                 "name": settings.get("device_name") if isinstance(settings.get("device_name"), str) else None,
@@ -2338,7 +2338,7 @@ class HostService:
             finally:
                 self._workers.discard(thread)
 
-        thread = threading.Thread(target=run, name=f"steamos-remote-{operation_id}", daemon=True)
+        thread = threading.Thread(target=run, name=f"steamos-companion-{operation_id}", daemon=True)
         self._workers.add(thread)
         thread.start()
 
@@ -2362,7 +2362,7 @@ class HostService:
     def _start_preview_watchdog(self) -> None:
         if self._preview_thread and self._preview_thread.is_alive():
             return
-        self._preview_thread = threading.Thread(target=self._preview_watchdog, name="steamos-remote-preview", daemon=True)
+        self._preview_thread = threading.Thread(target=self._preview_watchdog, name="steamos-companion-preview", daemon=True)
         self._preview_thread.start()
 
     def _preview_watchdog(self) -> None:

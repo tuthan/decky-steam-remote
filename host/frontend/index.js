@@ -1,4 +1,4 @@
-/* SteamOS Remote Decky frontend.
+/* SteamOS Companion Decky frontend.
  *
  * The backend owns the LAN API and operation journal. This module is the
  * long-lived Steam bridge: it only calls fixed DisplayManager/System/Settings
@@ -8,7 +8,7 @@
  * display. No command accepts a raw Steam method or payload from the LAN.
  */
 (() => (serverAPI) => {
-  const tag = "[SteamOS Remote]";
+  const tag = "[SteamOS Companion]";
   const MAX_PROTO_BYTES = 64 * 1024;
   const MAX_STATE_BYTES = 256 * 1024;
   const commandPollMs = 500;
@@ -95,15 +95,15 @@
     start: "startSunshine",
   });
   const LOADER_API_KEY = "__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit";
-  const PLUGIN_NAME = "SteamOS Remote";
-  const BUILD_VERSION = "__STEAMOS_REMOTE_VERSION__";
+  const PLUGIN_NAME = "SteamOS Companion";
+  const BUILD_VERSION = "__STEAMOS_COMPANION_VERSION__";
   const LOADER_API_VERSION = 2;
-  const UPDATE_REPOSITORY = "tuthan/decky-steam-remote";
+  const UPDATE_REPOSITORY = "tuthan/steamos-companion-decky";
   const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
   const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
   const UPDATE_MIN_CHECK_INTERVAL_MS = 30 * 1000;
   const UPDATE_INSTALL_TYPE = 2; // Decky's PluginInstallType.UPDATE.
-  const UPDATE_ASSET_PREFIX = "steamos-remote-decky-";
+  const UPDATE_ASSET_PREFIX = "steamos-companion-decky-";
   const BACKEND_ARGUMENTS = Object.freeze({
     get_settings: [],
     update_settings: ["changes"],
@@ -397,7 +397,7 @@
     publishUpdate({status: "installing", error: null});
     const toaster = serverAPI?.toaster;
     if (typeof toaster?.toast === "function") {
-      try { toaster.toast({title: "SteamOS Remote update", body: `Decky is ready to install v${release.version}. Confirm the Decky installation prompt.`, duration: 8000}); } catch (_) {}
+      try { toaster.toast({title: "SteamOS Companion update", body: `Decky is ready to install v${release.version}. Confirm the Decky installation prompt.`, duration: 8000}); } catch (_) {}
     }
     return {requested: true, version: release.version};
   }
@@ -870,8 +870,8 @@
     const code = item?.verification_code ? `Code: ${boundedString(item.verification_code, 32)}` : "Open the plugin to review the pairing request.";
     try {
       toaster.toast({
-        title: "SteamOS Remote pairing request",
-        body: `${client} requested access. ${code} Open SteamOS Remote and approve only after checking the matching code.`,
+        title: "SteamOS Companion pairing request",
+        body: `${client} requested access. ${code} Open SteamOS Companion and approve only after checking the matching code.`,
         duration: 10000,
       });
     } catch (error) {
@@ -1218,7 +1218,7 @@
     }
 
     return React.createElement("div", {style: {padding: "12px", lineHeight: "1.45", maxWidth: "680px", minHeight: "100%", color: UI_COLORS.text, background: UI_COLORS.background}},
-      React.createElement("h2", null, "SteamOS Remote host"),
+      React.createElement("h2", null, "SteamOS Companion host"),
       React.createElement("p", null, `Host identity: ${settings?.host_id || "Unavailable"}`),
       React.createElement("p", null, `Steam bridge: ${bridge?.ready ? "Ready" : "Unavailable"}${bridge?.reason ? ` — ${bridge.reason}` : ""}`),
       React.createElement("p", null, `TLS pin: ${settings?.tls?.fingerprint || "Unavailable"}${settings?.tls?.reason ? ` — ${settings.tls.reason}` : ""}`),
@@ -1521,7 +1521,7 @@
           navigate("pairing");
         }
       } catch (error) {
-        setMessage(`SteamOS Remote couldn't load: ${boundedString(error)}`);
+        setMessage(`SteamOS Companion couldn't load: ${boundedString(error)}`);
       }
     }
 
@@ -1721,7 +1721,7 @@
         ...(settings?.setup_complete ? [{id: "settings", label: "Settings"}] : []),
       ];
       return React.createElement(React.Fragment || "div", null,
-        React.createElement("h2", {style: {color: UI_COLORS.text}}, view === "remote" ? "Remote device" : view === "this-device" ? "This device" : view === "local-display" ? "Active screen" : "SteamOS Remote"),
+        React.createElement("h2", {style: {color: UI_COLORS.text}}, view === "remote" ? "Remote device" : view === "this-device" ? "This device" : view === "local-display" ? "Active screen" : "SteamOS Companion"),
         React.createElement("nav", {"aria-label": "Destinations", style: {display: "flex", gap: "6px", flexWrap: "wrap", color: UI_COLORS.text}},
           destinations.map(item => React.createElement(Button, {key: item.id, label: item.label, focusKey: `destination.${item.id}`, onClick: () => navigate(item.id)}))
         )
@@ -1745,7 +1745,7 @@
     }
 
     async function startScan() {
-      const value = await run("begin_discovery", {port: 18443}, "Looking for SteamOS Remote devices…");
+      const value = await run("begin_discovery", {port: 18443}, "Looking for SteamOS Companion devices…");
       if (value?.scan_id) {
         scanRef.current = value.scan_id;
         setScan(value);
@@ -1756,10 +1756,10 @@
     function renderRemoteSetup() {
       const pending = client.pending_pairing || pendingPairing;
       return React.createElement(PanelSection, {title: "Connect a remote device"},
-        React.createElement(PanelSectionRow, {focusKey: "remote-setup.explanation"}, React.createElement(Text, null, "On the other device, install SteamOS Remote and enable Server or Both. Connect both devices to the same local network.")),
+        React.createElement(PanelSectionRow, {focusKey: "remote-setup.explanation"}, React.createElement(Text, null, "On the other device, install SteamOS Companion and enable Server or Both. Connect both devices to the same local network.")),
         pending && React.createElement(PanelSectionRow, {focusKey: "remote-setup.resume"}, React.createElement(Button, {label: "Resume pairing", onClick: () => {setPendingPairing(pending); pairingRef.current = pending.id; navigate("pairing");}, focusKey: "remote-setup.resume"})),
         scan?.state === "searching"
-          ? React.createElement(PanelSectionRow, {focusKey: "discovery.cancel"}, React.createElement(Text, {live: true}, "Looking for SteamOS Remote devices…"), React.createElement(Button, {label: "Cancel", onClick: async () => {await run("cancel_discovery", {scan_id: scan.scan_id}); scanRef.current = null; setScan({...scan, state: "cancelled"});}, focusKey: "discovery.cancel"}))
+          ? React.createElement(PanelSectionRow, {focusKey: "discovery.cancel"}, React.createElement(Text, {live: true}, "Looking for SteamOS Companion devices…"), React.createElement(Button, {label: "Cancel", onClick: async () => {await run("cancel_discovery", {scan_id: scan.scan_id}); scanRef.current = null; setScan({...scan, state: "cancelled"});}, focusKey: "discovery.cancel"}))
           : React.createElement(PanelSectionRow, {focusKey: "discovery.find"}, React.createElement(Button, {label: "Find devices", onClick: () => void startScan(), disabled: Boolean(busy), focusKey: "discovery.find"})),
         scan?.state === "failed" && React.createElement(PanelSectionRow, {focusKey: "discovery.error"}, React.createElement(Text, {live: true}, scan.error || "The scan failed. Try again.")),
         scan?.state === "complete" && !candidates.length && React.createElement(PanelSectionRow, {focusKey: "discovery.empty"}, React.createElement(Text, null, "No devices found. Check that Server is enabled on the other device.")),
@@ -1778,7 +1778,7 @@
           if (!manualHost || !Number.isInteger(port) || port < 1 || port > 65535) {setManualError("Enter a valid host and port."); return;}
           const value = await run("check_remote_device", {host: manualHost, port}, "");
           if (value) {setCandidate(value); navigate("candidate");}
-          else setManualError(`No SteamOS Remote server responded at https://${manualHost}:${port}`);
+          else setManualError(`No SteamOS Companion server responded at https://${manualHost}:${port}`);
         }, focusKey: "manual.check"})),
         React.createElement(PanelSectionRow, {focusKey: "manual.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("remote-setup"), focusKey: "manual.back"}))
       );
@@ -1811,7 +1811,7 @@
       return React.createElement(PanelSection, {title: "Pairing"},
         React.createElement(PanelSectionRow, {focusKey: "pairing.endpoint"}, React.createElement(Text, null, item.name || item.endpoint), React.createElement(Text, {muted: true}, item.endpoint)),
         React.createElement(PanelSectionRow, {focusKey: "pairing.code"}, React.createElement(Text, null, "Compare the code"), React.createElement("div", {role: "status", "aria-label": `Pairing comparison code ${code}`, style: {fontSize: "36px", fontFamily: "monospace", fontWeight: "bold", letterSpacing: "4px", marginTop: "8px", color: UI_COLORS.accent}}, code.replace(/^(....)(....)$/, "$1 $2")), React.createElement(Text, null, expired ? "Expired" : `Expires in ${seconds === null ? "unknown" : `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`}`)),
-        React.createElement(PanelSectionRow, {focusKey: "pairing.instructions"}, React.createElement(Text, null, "On the other device, open SteamOS Remote → This device. Approve only if both codes match."), React.createElement(Text, {live: true}, item.last_error || "Waiting for approval…")),
+        React.createElement(PanelSectionRow, {focusKey: "pairing.instructions"}, React.createElement(Text, null, "On the other device, open SteamOS Companion → This device. Approve only if both codes match."), React.createElement(Text, {live: true}, item.last_error || "Waiting for approval…")),
         React.createElement(PanelSectionRow, {focusKey: "pairing.cancel"}, React.createElement(Button, {label: "Cancel request", onClick: async () => {await run("cancel_remote_pairing", {pending_id: item.id}); pairingRef.current = null; setPendingPairing(null); navigate("remote-setup");}, focusKey: "pairing.cancel"})),
         React.createElement(PanelSectionRow, {focusKey: "pairing.back"}, React.createElement(Button, {label: "Back", onClick: () => navigate("remote-setup"), focusKey: "pairing.back"}))
       );
@@ -2226,7 +2226,7 @@
             setMessage("");
             try {
               await checkForUpdate(true);
-              if (updateState.status === "current") setMessage("SteamOS Remote is up to date.");
+              if (updateState.status === "current") setMessage("SteamOS Companion is up to date.");
             } catch (error) {
               setMessage(boundedString(error));
             } finally {
@@ -2339,7 +2339,7 @@
     }
 
     function renderBody() {
-      if (!settings || view === "loading") return React.createElement(PanelSection, {title: "SteamOS Remote"}, React.createElement(Text, {live: true}, "Checking device…"));
+      if (!settings || view === "loading") return React.createElement(PanelSection, {title: "SteamOS Companion"}, React.createElement(Text, {live: true}, "Checking device…"));
       if (view === "setup") return renderSetup();
       if (view === "remote-setup") return renderRemoteSetup();
       if (view === "manual") return renderManual();
@@ -2373,7 +2373,7 @@
       height: 24,
       fill: "none",
       role: "img",
-      "aria-label": "SteamOS Remote",
+      "aria-label": "SteamOS Companion",
       focusable: "false",
     },
     React.createElement("g", {fill: "none", stroke: "#f2f4f5", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round"},
@@ -2383,7 +2383,7 @@
   }
 
   return {
-    name: "SteamOS Remote",
+    name: "SteamOS Companion",
     icon: PluginIcon(),
     content: React ? React.createElement(ClientContent) : null,
     onDismount() {

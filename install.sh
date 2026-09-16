@@ -11,7 +11,7 @@ usage() {
     cat <<'EOF'
 Usage: install.sh [VERSION]
 
-Install the SteamOS Remote Decky plugin from a GitHub release.
+Install the SteamOS Companion Decky plugin from a GitHub release.
 
 VERSION may be a release tag such as v0.4.0. If omitted, the latest release
 is installed. VERSION can also be supplied through the environment.
@@ -27,8 +27,8 @@ fi
 [[ "${EUID}" -ne 0 ]] || die "run this script as the Steam Deck user, not root"
 [[ -n "${HOME:-}" ]] || die "HOME is not set"
 
-readonly REPOSITORY="${REPOSITORY:-tuthan/decky-steam-remote}"
-readonly PLUGIN_NAME="steamos-remote"
+readonly REPOSITORY="${REPOSITORY:-tuthan/steamos-companion-decky}"
+readonly PLUGIN_NAME="steamos-companion"
 readonly PLUGIN_DIR="${DECKY_PLUGIN_DIR:-${HOME}/homebrew/plugins}"
 readonly REQUESTED_VERSION="${1:-${VERSION:-LATEST}}"
 
@@ -79,7 +79,7 @@ release_json="$(curl \
     --retry 3 \
     --header 'Accept: application/vnd.github+json' \
     --header 'X-GitHub-Api-Version: 2022-11-28' \
-    --user-agent 'steamos-remote-installer' \
+    --user-agent 'steamos-companion-installer' \
     "${release_url}")" || die "could not read the GitHub release"
 
 release_tag="$(
@@ -94,17 +94,17 @@ release_version="${release_tag#v}"
 
 download_url="$(
     printf '%s\n' "${release_json}" |
-        sed -nE 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"([^"[:space:]]*\/steamos-remote-decky-[^"[:space:]]+\.zip)".*/\1/p' |
-        awk -v expected="steamos-remote-decky-${release_version}.zip" '
+        sed -nE 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"([^"[:space:]]*\/steamos-companion-decky-[^"[:space:]]+\.zip)".*/\1/p' |
+        awk -v expected="steamos-companion-decky-${release_version}.zip" '
             $0 ~ "/" expected "$" { print; exit }
         '
 )"
-[[ -n "${download_url}" ]] || die "release does not contain a steamos-remote-decky ZIP asset"
+[[ -n "${download_url}" ]] || die "release does not contain a steamos-companion-decky ZIP asset"
 [[ "${download_url}" == "https://github.com/${REPOSITORY}/releases/download/"* ]] || \
     die "release asset is not hosted by the configured GitHub repository"
 
 archive_name="${download_url##*/}"
-[[ "${archive_name}" == steamos-remote-decky-*.zip ]] || \
+[[ "${archive_name}" == steamos-companion-decky-*.zip ]] || \
     die "unexpected release asset: ${archive_name}"
 
 archive_path="${tmp_dir}/${archive_name}"
